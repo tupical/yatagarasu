@@ -47,6 +47,12 @@ pub struct PlanBrief {
     /// §15 Q9: What risks are known?
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub risks: Vec<String>,
+    /// Hard boundaries the plan must respect, carried over from the
+    /// Decisions layer's `constraint` directives. Not one of the 14 §15
+    /// questions, but a first-class field so a constraint set upstream is
+    /// not lost on the way to Actions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub constraints: Vec<String>,
 
     // ── Optional ──────────────────────────────────────────────────────────────
     /// §15 Q4: What knowledge underpins the plan?
@@ -82,6 +88,74 @@ pub struct PlanReadinessReport {
     pub is_ready: bool,
     pub missing: Vec<String>,
     pub allowed: Vec<String>,
+}
+
+// ── Decisions → Planning adapter ────────────────────────────────────────────────
+
+impl PlanBrief {
+    /// Build a [`PlanBrief`] from the upstream Decisions layer, preserving
+    /// the lineage of every choice it rests on.
+    ///
+    /// Planning sits downstream of Decisions in the MCPBox pipeline
+    /// (Intake → Sensemaking → Decisions → **Planning** → Actions;
+    /// vision.md §6.3): a plan is the *realisation* of direction that has
+    /// already been fixed. This adapter turns that fixed direction into a
+    /// draft brief.
+    ///
+    /// `directives` drive the §15 frame:
+    /// - the first [`Goal`](decisions_oss::DirectiveKind::Goal) directive
+    ///   becomes the brief's `goal`;
+    /// - every
+    ///   [`SuccessCriteria`](decisions_oss::DirectiveKind::SuccessCriteria)
+    ///   becomes a `completion_criteria` entry;
+    /// - every
+    ///   [`Constraint`](decisions_oss::DirectiveKind::Constraint) becomes a
+    ///   `constraints` entry;
+    /// - every [`NonGoal`](decisions_oss::DirectiveKind::NonGoal) becomes an
+    ///   `out_of_scope` entry.
+    ///
+    /// `decisions` populate `decisions_made` — and this is the load-bearing
+    /// part: each entry is the source [`Decision`](decisions_oss::Decision)'s
+    /// id (its `Display` form, e.g. `dec_<uuid>`), so the produced brief
+    /// always knows *which* recorded choices it descends from. Lineage is
+    /// the core value MCPBox preserves; a plan that forgot its decisions
+    /// could not be audited later.
+    ///
+    /// The brief that comes back is a *draft*: fields with no Decisions-layer
+    /// counterpart (`in_scope`, `taskagent_target`, …) are left empty for the
+    /// planner to fill, so a freshly-adapted brief will usually not yet pass
+    /// [`check_readiness`].
+    pub fn from_decisions(
+        decisions: &[decisions_oss::Decision],
+        directives: &[decisions_oss::Directive],
+    ) -> Self {
+        use decisions_oss::DirectiveKind;
+
+        let goal = directives
+            .iter()
+            .find(|d| d.kind == DirectiveKind::Goal)
+            .map(|d| d.statement.clone())
+            .unwrap_or_default();
+
+        let collect = |kind: DirectiveKind| -> Vec<String> {
+            directives
+                .iter()
+                .filter(|d| d.kind == kind)
+                .map(|d| d.statement.clone())
+                .collect()
+        };
+
+        Self {
+            goal,
+            completion_criteria: collect(DirectiveKind::SuccessCriteria),
+            constraints: collect(DirectiveKind::Constraint),
+            out_of_scope: collect(DirectiveKind::NonGoal),
+            // Lineage: keep the id of every source decision so the plan can
+            // be traced back to the choices it realises.
+            decisions_made: decisions.iter().map(|d| d.id.to_string()).collect(),
+            ..Self::default()
+        }
+    }
 }
 
 // ── Logic ─────────────────────────────────────────────────────────────────────
@@ -249,5 +323,83 @@ mod tests {
         let json = serde_json::to_string(&brief).unwrap();
         let back: PlanBrief = serde_json::from_str(&json).unwrap();
         assert_eq!(brief, back);
+    }
+
+    // ── Decisions → Planning adapter ─────────────────────────────────────────
+
+    use decisions_oss::{
+        Actor, Decision, Directive, DirectiveKind, NewDecision, NewDirective,
+    };
+
+    fn decision(statement: &str) -> Decision {
+        NewDecision {
+            id: None,
+            statement: statement.into(),
+            decided_by: Actor::user(),
+            decided_at: None,
+            rationale: String::new(),
+            alternatives: vec![],
+            consequences: vec![],
+            revisit_when: String::new(),
+            links: vec![],
+        }
+        .into_decision(decisions_oss::time::now())
+        .expect("valid decision")
+    }
+
+    fn directive(kind: DirectiveKind, statement: &str) -> Directive {
+        NewDirective {
+            id: None,
+            kind,
+            statement: statement.into(),
+            set_by: Actor::user(),
+            rationale: String::new(),
+            links: vec![],
+        }
+        .into_directive(decisions_oss::time::now())
+        .expect("valid directive")
+    }
+
+    #[test]
+    fn from_decisions_maps_directive_kinds() {
+        let directives = vec![
+            directive(DirectiveKind::Goal, "Ship the planning adapter"),
+            directive(DirectiveKind::SuccessCriteria, "cargo test green"),
+            directive(DirectiveKind::Constraint, "no actions_oss dependency"),
+            directive(DirectiveKind::NonGoal, "no AI inference here"),
+        ];
+        let brief = PlanBrief::from_decisions(&[], &directives);
+
+        assert_eq!(brief.goal, "Ship the planning adapter");
+        assert_eq!(brief.completion_criteria, vec!["cargo test green"]);
+        assert_eq!(brief.constraints, vec!["no actions_oss dependency"]);
+        assert_eq!(brief.out_of_scope, vec!["no AI inference here"]);
+    }
+
+    #[test]
+    fn from_decisions_preserves_source_decision_ids() {
+        let decisions = vec![
+            decision("Use PlanBrief as the planning output"),
+            decision("Keep ActionPacket in actions_oss only"),
+        ];
+        let expected: Vec<String> = decisions.iter().map(|d| d.id.to_string()).collect();
+
+        let brief = PlanBrief::from_decisions(&decisions, &[]);
+
+        // Lineage is the point: every source decision's id survives, in order.
+        assert_eq!(brief.decisions_made, expected);
+        assert!(brief.decisions_made.iter().all(|id| id.starts_with("dec_")));
+    }
+
+    #[test]
+    fn from_decisions_produces_a_draft_not_yet_ready() {
+        // With only a goal, the brief is missing required §15 fields and so
+        // is a draft for the planner to finish — not yet ready.
+        let directives = vec![directive(DirectiveKind::Goal, "some goal")];
+        let brief = PlanBrief::from_decisions(&[], &directives);
+        let report = check_readiness(&brief);
+        assert!(!report.is_ready);
+        assert!(report.missing.iter().any(|f| f == "in_scope"));
+        assert!(report.missing.iter().any(|f| f == "taskagent_target"));
     }
 }

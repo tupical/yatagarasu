@@ -17,6 +17,12 @@ taskagent-shared   = { path = "vendor/oss/crates/shared" }
 taskagent-domain   = { path = "vendor/oss/crates/domain" }
 taskagent-core     = { path = "vendor/oss/crates/core" }
 
+# The Decisions layer (sibling *-oss crate), consumed read-only so the
+# Decisions→Planning adapter (`PlanBrief::from_decisions`) can read
+# `Decision`/`Directive` and carry their ids as plan lineage. Planning is
+# downstream of Decisions in the MCPBox pipeline (vision.md §6.3).
+decisions-oss = { path = "../decisions_oss" }
+
 serde      = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio      = { version = "1.52", features = ["macros", "rt-multi-thread"] }
@@ -26,3 +32,47 @@ tinytemplate = "1.2"
 
 [dev-dependencies]
 taskagent-ai-infra = { path = "vendor/oss/crates/ai-infra", features = ["testing"] }
+
+# Deduplicate vendored crates: the decisions_oss dependency (and its
+# transitive sensemaking_oss → intake_oss chain) reference the same taskagent
+# OSS tree through their own vendor/oss symlinks, producing different path
+# strings that Cargo would treat as distinct packages. Since planning_oss is
+# the graph root here, the downstream crates' own [patch] sections do not
+# apply — so canonicalise every transitive reference onto this crate's
+# vendor/oss copies. [patch] keys must be file:// URIs, not relative paths
+# (Cargo 1.96+). Pattern mirrors sensemaking_oss / decisions_oss.
+[patch."file:///home/av/projects/decisions_oss/vendor/oss/crates/shared"]
+taskagent-shared = { path = "vendor/oss/crates/shared" }
+
+[patch."file:///home/av/projects/decisions_oss/vendor/oss/crates/domain"]
+taskagent-domain = { path = "vendor/oss/crates/domain" }
+
+[patch."file:///home/av/projects/decisions_oss/vendor/oss/crates/ai-infra"]
+taskagent-ai-infra = { path = "vendor/oss/crates/ai-infra" }
+
+[patch."file:///home/av/projects/decisions_oss/vendor/oss/crates/core"]
+taskagent-core = { path = "vendor/oss/crates/core" }
+
+[patch."file:///home/av/projects/sensemaking_oss/vendor/oss/crates/shared"]
+taskagent-shared = { path = "vendor/oss/crates/shared" }
+
+[patch."file:///home/av/projects/sensemaking_oss/vendor/oss/crates/domain"]
+taskagent-domain = { path = "vendor/oss/crates/domain" }
+
+[patch."file:///home/av/projects/sensemaking_oss/vendor/oss/crates/ai-infra"]
+taskagent-ai-infra = { path = "vendor/oss/crates/ai-infra" }
+
+[patch."file:///home/av/projects/sensemaking_oss/vendor/oss/crates/core"]
+taskagent-core = { path = "vendor/oss/crates/core" }
+
+[patch."file:///home/av/projects/intake_oss/vendor/oss/crates/shared"]
+taskagent-shared = { path = "vendor/oss/crates/shared" }
+
+[patch."file:///home/av/projects/intake_oss/vendor/oss/crates/domain"]
+taskagent-domain = { path = "vendor/oss/crates/domain" }
+
+[patch."file:///home/av/projects/intake_oss/vendor/oss/crates/ai-infra"]
+taskagent-ai-infra = { path = "vendor/oss/crates/ai-infra" }
+
+[patch."file:///home/av/projects/intake_oss/vendor/oss/crates/core"]
+taskagent-core = { path = "vendor/oss/crates/core" }
