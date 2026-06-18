@@ -19,7 +19,9 @@
 //! - All JSON is built with [`serde_json::json!`]; no string concatenation.
 //! - Errors propagate as [`taskagent_shared::CoreError`].
 
+pub mod action_packet;
 pub mod decompose;
+pub mod plan_brief;
 pub mod prompts;
 pub mod scope;
 
@@ -35,5 +37,7 @@ pub use prompts::PromptRegistry;
 
 // ── Operation re-exports ────────────────────────────────────────────────────────
 
+pub use action_packet::ActionPacket;
 pub use decompose::decompose_task;
+pub use plan_brief::{check_readiness, PlanBrief, PlanReadinessReport};
 pub use scope::{scope_task, ScopeDirection};
