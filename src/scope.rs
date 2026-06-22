@@ -1,27 +1,17 @@
-//! Task scope adjustment (§3.8.7) — broaden or narrow an existing task.
+//! Task scope adjustment — broaden or narrow an existing task.
 //!
 //! The model rewrites the task's title + description at a target
 //! complexity level (`up` = broader / epic-style, `down` = narrower /
-//! one concrete action) and the server turns the result into a
-//! `Command::UpdateTask`.
-//!
-//! `strength` (light/regular/heavy) is intentionally absent here — the
-//! task description marks it as deferred to §3.8.7a. The wire shape
-//! accepts the field today only at the HTTP / MCP boundary so callers
-//! can author against the final shape; this function does not consume
-//! it yet.
+//! one concrete action). The output is a provider-neutral [`UpdateDraft`];
+//! mcpbox turns it into taskagent's `Command::UpdateTask { id, patch }`.
 
 use serde::Serialize;
 use serde_json::Value;
-use taskagent_core::Command;
-use taskagent_domain::{Task, TaskPatch};
-use taskagent_shared::CoreError;
 
-use taskagent_ai_infra::{
-    client::OpenAiClient, provider::AiProvider, tools, untrusted::wrap_untrusted,
-};
-
+use crate::ai::{rescope_task_tool, wrap_untrusted, AiOutput, AiProvider, AiRequest};
+use crate::error::PlanningError;
 use crate::prompts::PromptRegistry;
+use crate::task::{Task, TaskId, TaskPatchDraft};
 
 /// Direction the rewrite should move in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,15 +28,23 @@ impl ScopeDirection {
         }
     }
 
-    pub fn parse(raw: &str) -> Result<Self, CoreError> {
+    pub fn parse(raw: &str) -> Result<Self, PlanningError> {
         match raw {
             "up" | "broaden" => Ok(ScopeDirection::Up),
             "down" | "narrow" => Ok(ScopeDirection::Down),
-            other => Err(CoreError::validation(format!(
+            other => Err(PlanningError::validation(format!(
                 "unknown scope direction: {other} (expected 'up' or 'down')"
             ))),
         }
     }
+}
+
+/// The structured result of the `scope` operation: a sparse update for a
+/// specific task, before it becomes a taskagent `Command::UpdateTask`.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct UpdateDraft {
+    pub id: TaskId,
+    pub patch: TaskPatchDraft,
 }
 
 #[derive(Serialize)]
@@ -70,41 +68,58 @@ pub fn build_scope_prompt(task: &Task, direction: ScopeDirection) -> String {
     .expect("bundled scope prompt is well-formed")
 }
 
-/// Ask the model to rescope `task`, returning a `Command::UpdateTask`
-/// patch with the rewritten title + description.
-pub async fn scope_task(
-    client: &OpenAiClient,
+/// Ask the model to rescope `task`, returning an [`UpdateDraft`] with the
+/// rewritten title + description. The concrete model client is supplied by
+/// the caller via [`AiProvider`].
+pub async fn scope_task<P: AiProvider>(
+    provider: &P,
     task: &Task,
     direction: ScopeDirection,
-) -> Result<Command, CoreError> {
+) -> Result<UpdateDraft, PlanningError> {
     let prompt = build_scope_prompt(task, direction);
-    let args: Value = client
-        .generate_object(prompt, vec![tools::rescope_task_tool()], "rescope_task")
-        .await?;
+
+    let req = AiRequest {
+        input: Value::String(prompt),
+        tools: vec![rescope_task_tool()],
+        tool_choice: Some("required".into()),
+    };
+
+    let outputs = provider.respond(req).await?;
+
+    let tc = outputs
+        .into_iter()
+        .find_map(|o| match o {
+            AiOutput::ToolCall(tc) if tc.name == "rescope_task" => Some(tc),
+            _ => None,
+        })
+        .ok_or_else(|| PlanningError::ai("scope_task: model returned no rescope_task call"))?;
+
+    let args: Value =
+        serde_json::from_str(&tc.arguments).map_err(|e| PlanningError::serde(e.to_string()))?;
 
     let title = args["title"]
         .as_str()
-        .ok_or_else(|| CoreError::ai("rescope_task: missing 'title' in tool args"))?
+        .ok_or_else(|| PlanningError::ai("rescope_task: missing 'title' in tool args"))?
         .trim()
         .to_owned();
     if title.is_empty() {
-        return Err(CoreError::ai("rescope_task: empty title"));
+        return Err(PlanningError::ai("rescope_task: empty title"));
     }
     let description = args["description"].as_str().unwrap_or("").to_owned();
 
-    let patch = TaskPatch {
+    let patch = TaskPatchDraft {
         title: Some(title),
         description: Some(description),
-        ..TaskPatch::default()
     };
-    Ok(Command::UpdateTask { id: task.id, patch })
+    Ok(UpdateDraft { id: task.id, patch })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use taskagent_domain::{Priority, Status};
-    use taskagent_shared::{time, ProjectId, TaskId};
+    use crate::ai::{AiError, ToolCall};
+    use crate::task::{Priority, ProjectId, Status};
+    use crate::time;
 
     fn sample_task() -> Task {
         let now = time::now();
@@ -115,18 +130,22 @@ mod tests {
             description: "Connect to /v1/auth/login and store the bearer token.".into(),
             status: Status::Todo,
             priority: Priority::P2,
-            triage_state: None,
-            due_at: None,
             created_at: now,
             updated_at: now,
-            started_at: None,
-            completed_at: None,
-            created_by: None,
-            completed_by: None,
-            updated_by: None,
-            updated_event_id: None,
-            updated_event_seq: None,
-            source_event_id: None,
+        }
+    }
+
+    /// Minimal provider returning a fixed `rescope_task` call.
+    struct FakeProvider {
+        args: String,
+    }
+
+    impl AiProvider for FakeProvider {
+        async fn respond(&self, _req: AiRequest) -> Result<Vec<AiOutput>, AiError> {
+            Ok(vec![AiOutput::ToolCall(ToolCall {
+                name: "rescope_task".into(),
+                arguments: self.args.clone(),
+            })])
         }
     }
 
@@ -160,5 +179,29 @@ mod tests {
         let p = build_scope_prompt(&t, ScopeDirection::Down);
         assert!(p.contains("Wire login form"));
         assert!(p.contains("Narrow"));
+    }
+
+    #[tokio::test]
+    async fn scope_maps_tool_call_to_update_draft() {
+        let task = sample_task();
+        let fake = FakeProvider {
+            args: r#"{"title":"  Ship auth epic  ","description":"broader scope"}"#.into(),
+        };
+        let draft = scope_task(&fake, &task, ScopeDirection::Up).await.unwrap();
+        assert_eq!(draft.id, task.id);
+        assert_eq!(draft.patch.title.as_deref(), Some("Ship auth epic"));
+        assert_eq!(draft.patch.description.as_deref(), Some("broader scope"));
+    }
+
+    #[tokio::test]
+    async fn scope_empty_title_is_error() {
+        let task = sample_task();
+        let fake = FakeProvider {
+            args: r#"{"title":"   ","description":"x"}"#.into(),
+        };
+        let err = scope_task(&fake, &task, ScopeDirection::Down)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, PlanningError::Ai(_)));
     }
 }
