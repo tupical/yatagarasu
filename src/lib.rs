@@ -1,4 +1,4 @@
-//! `planning-oss` — the Planning layer skeleton.
+//! `yatagarasu` — the Planning layer skeleton.
 //!
 //! A self-contained open-core skeleton: it defines its own primitives,
 //! domain output types, a prompt engine, and a provider-neutral

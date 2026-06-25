@@ -7,7 +7,7 @@
 //!
 //! ```ignore
 //! use serde::Serialize;
-//! use planning_oss::prompts::PromptRegistry;
+//! use yatagarasu::prompts::PromptRegistry;
 //!
 //! #[derive(Serialize)]
 //! struct ScopeCtx<'a> { title: &'a str, description: &'a str }

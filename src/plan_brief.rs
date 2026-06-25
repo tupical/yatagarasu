@@ -182,7 +182,7 @@ mod tests {
             goal: "Ship Plan-readiness primitive".into(),
             in_scope: vec!["plan_brief.rs".into()],
             completion_criteria: vec!["cargo test green".into()],
-            taskagent_target: "planning_oss project".into(),
+            taskagent_target: "yatagarasu project".into(),
             why_now: Some("Wave-2b pilot needs it first".into()),
             decisions_made: vec!["Apache-2.0 + Commons-Clause".into()],
             risks: vec!["vendor/oss symlink is read-only".into()],
