@@ -1,10 +1,10 @@
-//! `planning-oss` — the Planning layer skeleton.
+//! `yatagarasu` — the Planning layer skeleton.
 //!
 //! A self-contained open-core skeleton: it defines its own primitives,
 //! domain output types, a prompt engine, and a provider-neutral
-//! [`AiProvider`] seam. It has **no** dependency on taskagent and **no**
+//! [`AiProvider`] seam. It has **no** dependency on daruma and **no**
 //! dependency on sibling `*_oss` layers. mcpbox supplies the concrete AI
-//! provider and any taskagent / decisions adapters when wiring the layer
+//! provider and any daruma / decisions adapters when wiring the layer
 //! into its architecture — implementations live only inside mcpbox.
 //!
 //! The crate owns the AI **planning** operations — `decompose` (a task →
@@ -15,7 +15,7 @@
 //! # Contract
 //! - The planning layer never writes to storage. `decompose` returns a
 //!   [`SplitDraft`] and `scope` returns an [`UpdateDraft`]; the caller
-//!   (mcpbox) maps them onto taskagent `Command`s and dispatches.
+//!   (mcpbox) maps them onto daruma `Command`s and dispatches.
 //! - All JSON is built with [`serde_json::json!`]; no string concatenation.
 //! - Errors propagate as [`PlanningError`].
 

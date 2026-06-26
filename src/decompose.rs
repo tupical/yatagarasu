@@ -3,7 +3,7 @@
 //! The planning layer owns the operation (prompt rendering, tool schema,
 //! arg mapping) but not the model client: callers pass any [`AiProvider`].
 //! The output is a provider-neutral [`SplitDraft`]; mcpbox maps it onto
-//! taskagent's `Command::SplitTask { parent, subtasks }` when dispatching.
+//! daruma's `Command::SplitTask { parent, subtasks }` when dispatching.
 
 use serde::Serialize;
 use serde_json::Value;
@@ -14,7 +14,7 @@ use crate::prompts::PromptRegistry;
 use crate::task::{TaskDraft, TaskId};
 
 /// The structured result of the `decompose` operation, before it becomes a
-/// taskagent `Command::SplitTask`.
+/// daruma `Command::SplitTask`.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct SplitDraft {
     /// The parent task being decomposed.

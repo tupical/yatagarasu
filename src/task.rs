@@ -4,10 +4,10 @@
 //! `Status`), the `Task` it reads (input to `scope`), and the
 //! provider-neutral output drafts it emits — [`TaskDraft`] (one decomposed
 //! sub-task) and [`TaskPatchDraft`] (a sparse rescope update). mcpbox maps
-//! these onto taskagent's `NewTask` / `Task` / `TaskPatch` and wraps them in
+//! these onto daruma's `NewTask` / `Task` / `TaskPatch` and wraps them in
 //! the appropriate `Command` (`SplitTask` / `UpdateTask`) when dispatching.
 //! Keeping these types local is what lets the layer compile with zero
-//! taskagent dependency.
+//! daruma dependency.
 
 use crate::time::Timestamp;
 use serde::{Deserialize, Serialize};
@@ -119,7 +119,7 @@ impl Status {
 // ── Task (input to `scope`) ─────────────────────────────────────────────
 
 /// A task the planning layer reads (e.g. to rescope). Provider-neutral
-/// mirror of taskagent's `Task`, carrying only the fields the planning
+/// mirror of daruma's `Task`, carrying only the fields the planning
 /// operations actually use. mcpbox maps its own `Task` onto this when it
 /// invokes the layer.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -141,7 +141,7 @@ pub struct Task {
 // ── Output drafts ───────────────────────────────────────────────────────
 
 /// The structured result of decomposing a parent into one sub-task, before
-/// it becomes a taskagent `NewTask`.
+/// it becomes a daruma `NewTask`.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TaskDraft {
     pub title: String,
@@ -163,7 +163,7 @@ impl TaskDraft {
 }
 
 /// A sparse rescope update emitted by `scope` (`None` = leave unchanged).
-/// mcpbox maps it onto taskagent's `TaskPatch` and wraps it in
+/// mcpbox maps it onto daruma's `TaskPatch` and wraps it in
 /// `Command::UpdateTask { id, patch }`.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TaskPatchDraft {

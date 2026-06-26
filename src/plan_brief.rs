@@ -1,7 +1,7 @@
 //! Plan readiness brief (§15) — deterministic structure and check.
 //!
 //! [`PlanBrief`] captures all 14 questions from manifest §15 that any plan
-//! must answer before handing work off to Actions / TaskAgent.  It is a
+//! must answer before handing work off to Actions / Daruma.  It is a
 //! pure data type: no AI calls, no storage writes.
 //!
 //! [`check_readiness`] inspects a brief and returns a [`PlanReadinessReport`]
@@ -11,7 +11,7 @@
 //! ## Required vs recommended fields
 //!
 //! **Required** (absence blocks readiness):
-//! `goal`, `in_scope`, `completion_criteria`, `taskagent_target`
+//! `goal`, `in_scope`, `completion_criteria`, `daruma_target`
 //!
 //! **Recommended** (absence is noted but does not block):
 //! `why_now`, `decisions_made`, `risks`
@@ -34,8 +34,8 @@ pub struct PlanBrief {
     pub in_scope: Vec<String>,
     /// §15 Q12: What are the completion criteria?
     pub completion_criteria: Vec<String>,
-    /// §15 Q13: What should land in TaskAgent?
-    pub taskagent_target: String,
+    /// §15 Q13: What should land in Daruma?
+    pub daruma_target: String,
 
     // ── Recommended ───────────────────────────────────────────────────────────
     /// §15 Q2: Why is this plan needed now?
@@ -112,8 +112,8 @@ pub fn check_readiness(brief: &PlanBrief) -> PlanReadinessReport {
         &mut allowed,
     );
     check_str(
-        brief.taskagent_target.as_str(),
-        "taskagent_target",
+        brief.daruma_target.as_str(),
+        "daruma_target",
         &mut missing,
         &mut allowed,
     );
@@ -182,7 +182,7 @@ mod tests {
             goal: "Ship Plan-readiness primitive".into(),
             in_scope: vec!["plan_brief.rs".into()],
             completion_criteria: vec!["cargo test green".into()],
-            taskagent_target: "planning_oss project".into(),
+            daruma_target: "yatagarasu project".into(),
             why_now: Some("Wave-2b pilot needs it first".into()),
             decisions_made: vec!["Apache-2.0 + Commons-Clause".into()],
             risks: vec!["vendor/oss symlink is read-only".into()],
@@ -199,7 +199,7 @@ mod tests {
         assert!(report.allowed.iter().any(|f| f == "goal"));
         assert!(report.allowed.iter().any(|f| f == "in_scope"));
         assert!(report.allowed.iter().any(|f| f == "completion_criteria"));
-        assert!(report.allowed.iter().any(|f| f == "taskagent_target"));
+        assert!(report.allowed.iter().any(|f| f == "daruma_target"));
         // recommended fields also surfaced
         assert!(report.allowed.iter().any(|f| f == "why_now"));
         assert!(report.allowed.iter().any(|f| f == "decisions_made"));
@@ -214,7 +214,7 @@ mod tests {
         assert!(report.missing.iter().any(|f| f == "goal"));
         assert!(report.missing.iter().any(|f| f == "in_scope"));
         assert!(report.missing.iter().any(|f| f == "completion_criteria"));
-        assert!(report.missing.iter().any(|f| f == "taskagent_target"));
+        assert!(report.missing.iter().any(|f| f == "daruma_target"));
         assert!(report.allowed.is_empty());
     }
 
@@ -223,13 +223,13 @@ mod tests {
         let brief = PlanBrief {
             goal: "Some goal".into(),
             in_scope: vec!["src/".into()],
-            // completion_criteria and taskagent_target missing
+            // completion_criteria and daruma_target missing
             ..PlanBrief::default()
         };
         let report = check_readiness(&brief);
         assert!(!report.is_ready);
         assert!(report.missing.iter().any(|f| f == "completion_criteria"));
-        assert!(report.missing.iter().any(|f| f == "taskagent_target"));
+        assert!(report.missing.iter().any(|f| f == "daruma_target"));
         assert!(!report.missing.iter().any(|f| f == "goal"));
         assert!(!report.missing.iter().any(|f| f == "in_scope"));
     }
@@ -241,7 +241,7 @@ mod tests {
             goal: "goal".into(),
             in_scope: vec!["scope".into()],
             completion_criteria: vec!["done".into()],
-            taskagent_target: "target".into(),
+            daruma_target: "target".into(),
             ..PlanBrief::default()
         };
         let report = check_readiness(&brief);
