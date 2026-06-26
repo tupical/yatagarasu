@@ -3,7 +3,7 @@
 //! The skeleton owns its own primitives (`TaskId`, `ProjectId`, `Priority`,
 //! `Status`), the `Task` it reads (input to `scope`), and the
 //! provider-neutral output drafts it emits — [`TaskDraft`] (one decomposed
-//! sub-task) and [`TaskPatchDraft`] (a sparse rescope update). mcpbox maps
+//! sub-task) and [`TaskPatchDraft`] (a sparse rescope update). the host maps
 //! these onto daruma's `NewTask` / `Task` / `TaskPatch` and wraps them in
 //! the appropriate `Command` (`SplitTask` / `UpdateTask`) when dispatching.
 //! Keeping these types local is what lets the layer compile with zero
@@ -120,7 +120,7 @@ impl Status {
 
 /// A task the planning layer reads (e.g. to rescope). Provider-neutral
 /// mirror of daruma's `Task`, carrying only the fields the planning
-/// operations actually use. mcpbox maps its own `Task` onto this when it
+/// operations actually use. the host maps its own `Task` onto this when it
 /// invokes the layer.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Task {
@@ -163,7 +163,7 @@ impl TaskDraft {
 }
 
 /// A sparse rescope update emitted by `scope` (`None` = leave unchanged).
-/// mcpbox maps it onto daruma's `TaskPatch` and wraps it in
+/// the host maps it onto daruma's `TaskPatch` and wraps it in
 /// `Command::UpdateTask { id, patch }`.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TaskPatchDraft {

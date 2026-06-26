@@ -3,7 +3,7 @@
 //! The model rewrites the task's title + description at a target
 //! complexity level (`up` = broader / epic-style, `down` = narrower /
 //! one concrete action). The output is a provider-neutral [`UpdateDraft`];
-//! mcpbox turns it into daruma's `Command::UpdateTask { id, patch }`.
+//! the host turns it into daruma's `Command::UpdateTask { id, patch }`.
 
 use serde::Serialize;
 use serde_json::Value;

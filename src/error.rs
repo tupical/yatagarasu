@@ -1,7 +1,7 @@
 //! Local error type.
 //!
 //! Replaces `daruma_shared::CoreError` so the skeleton is
-//! dependency-free. mcpbox maps [`PlanningError`] onto its own error surface
+//! dependency-free. the host maps [`PlanningError`] onto its own error surface
 //! when wiring the layer.
 
 use crate::ai::AiError;
