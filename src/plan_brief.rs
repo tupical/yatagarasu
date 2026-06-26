@@ -49,7 +49,7 @@ pub struct PlanBrief {
     pub risks: Vec<String>,
     /// Hard boundaries the plan must respect. Not one of the 14 §15
     /// questions, but a first-class field so a constraint set upstream is
-    /// not lost on the way to Actions. mcpbox fills this from the Decisions
+    /// not lost on the way to Actions. the host fills this from the Decisions
     /// layer's `constraint` directives when wiring the pipeline.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub constraints: Vec<String>,

@@ -2,7 +2,7 @@
 //!
 //! The planning layer owns the operation (prompt rendering, tool schema,
 //! arg mapping) but not the model client: callers pass any [`AiProvider`].
-//! The output is a provider-neutral [`SplitDraft`]; mcpbox maps it onto
+//! The output is a provider-neutral [`SplitDraft`]; the host maps it onto
 //! daruma's `Command::SplitTask { parent, subtasks }` when dispatching.
 
 use serde::Serialize;
