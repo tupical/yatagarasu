@@ -87,6 +87,10 @@ static PROMPTS: Lazy<Registry> = Lazy::new(|| {
     Registry::new(&[
         ("decompose", include_str!("../prompts/decompose.toml")),
         ("scope", include_str!("../prompts/scope.toml")),
+        (
+            "analyze_complexity",
+            include_str!("../prompts/analyze_complexity.toml"),
+        ),
     ])
 });
 
