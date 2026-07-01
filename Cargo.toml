@@ -23,3 +23,6 @@ tinytemplate = "1.2"
 
 [dev-dependencies]
 tokio = { version = "1.52", features = ["macros", "rt"] }
+
+[workspace]
+members = ["server"]
