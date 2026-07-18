@@ -1,7 +1,7 @@
 //! yatagarasu-server — thin, independently-deployed HTTP/MCP wrapper around the
 //! `yatagarasu` planning lib. Its own deploy unit (own systemd service, own
-//! port). Boundary-clean: no mcpbox dependency; the platform→tool auth contract
-//! is a configured shared key (see `auth`).
+//! port). Boundary-clean: no mcpbox dependency; the platform→tool auth
+//! contract and the axum/tokio scaffold live in `layer_kit::{auth,serve}`.
 //!
 //! Routes:
 //!   GET  /healthz   — open; liveness + version for the platform registry.
@@ -14,136 +14,54 @@
 //! Env: YATAGARASU_PORT (default 8093), YATAGARASU_PLATFORM_SECRET (HMAC key;
 //! if unset, /v1/mcp is closed), YATAGARASU_VERSION (defaults to the crate
 //! version). AI methods: OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL
-//! (see `ai`); without a key they answer `ai_not_configured`.
+//! (see `layer_kit::openai`); without a key they answer `ai_not_configured`.
 
-mod ai;
-mod auth;
-
-use std::{
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
-};
-
-use axum::{
-    body::Bytes,
-    extract::State,
-    http::{HeaderMap, StatusCode},
-    response::IntoResponse,
-    routing::{get, post},
-    Json, Router,
-};
+use axum::http::StatusCode;
+use layer_kit::auth::Claims;
+use layer_kit::openai::{AiConfig, OpenAiProvider};
+use layer_kit::serve::{serve, McpHandler, ServeConfig};
 use serde_json::json;
 use yatagarasu::{PlanBrief, ScopeDirection, Task, TaskBrief, TaskId};
 
 const TOOL: &str = "yatagarasu";
 
-struct AppState {
-    version: String,
-    platform_secret: Option<Vec<u8>>,
-    /// Concrete AI provider; `None` when OPENAI_API_KEY is unset — AI methods
-    /// then answer `ai_not_configured` instead of panicking at call time.
-    ai: Option<ai::OpenAiProvider>,
+/// Dispatches yatagarasu's MCP methods; owns the (optional) AI provider.
+struct Handler {
+    /// `None` when OPENAI_API_KEY is unset — AI methods then answer
+    /// `ai_not_configured` instead of panicking at call time.
+    ai: Option<OpenAiProvider>,
+}
+
+impl McpHandler for Handler {
+    async fn dispatch(
+        &self,
+        _claims: &Claims,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
+        dispatch(self.ai.as_ref(), method, params).await
+    }
 }
 
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt().json().init();
 
-    let version = std::env::var("YATAGARASU_VERSION")
-        .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string());
-    let platform_secret = std::env::var("YATAGARASU_PLATFORM_SECRET")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .map(String::into_bytes);
-    if platform_secret.is_none() {
-        tracing::warn!("YATAGARASU_PLATFORM_SECRET unset — /v1/mcp will reject all requests");
-    }
-    let ai = ai::AiConfig::from_env().map(ai::OpenAiProvider::new);
+    let ai = AiConfig::from_env().map(OpenAiProvider::new);
     if ai.is_none() {
         tracing::warn!("OPENAI_API_KEY unset — AI methods (yatagarasu.decompose/scope/analyze_complexity) will answer ai_not_configured");
     }
-    let state = Arc::new(AppState {
-        version,
-        platform_secret,
-        ai,
-    });
 
-    let app = Router::new()
-        .route("/healthz", get(healthz))
-        .route("/v1/mcp", post(mcp))
-        .with_state(state);
-
-    let port = std::env::var("YATAGARASU_PORT").unwrap_or_else(|_| "8093".to_string());
-    // localhost-bound: only the co-located platform reaches it (C3 hardening).
-    let addr = format!("127.0.0.1:{port}");
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .unwrap_or_else(|e| panic!("bind {addr}: {e}"));
-    tracing::info!(%addr, tool = TOOL, "yatagarasu-server listening");
-    axum::serve(listener, app).await.expect("server error");
-}
-
-async fn healthz(State(s): State<Arc<AppState>>) -> impl IntoResponse {
-    Json(json!({ "service": TOOL, "status": "ok", "version": s.version, "git_sha": option_env!("GIT_SHA").unwrap_or("dev") }))
-}
-
-fn now_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
-async fn mcp(State(s): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> impl IntoResponse {
-    let Some(secret) = &s.platform_secret else {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error":"auth_disabled"})),
-        )
-            .into_response();
-    };
-    let token = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(str::trim);
-    let Some(claims) = token.and_then(|t| auth::verify(secret, TOOL, now_secs(), t)) else {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error":"invalid_platform_token"})),
-        )
-            .into_response();
-    };
-
-    // Auth passed — dispatch the MCP method against the yatagarasu planning lib.
-    let req: McpRequest = match serde_json::from_slice(&body) {
-        Ok(r) => r,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "bad_request", "detail": e.to_string()})),
-            )
-                .into_response();
-        }
-    };
-    match dispatch(s.ai.as_ref(), &req.method, req.params).await {
-        Ok(mut result) => {
-            result["tool"] = json!(TOOL);
-            result["version"] = json!(s.version);
-            result["workspace"] = json!(claims.workspace);
-            result["project"] = json!(claims.project);
-            Json(result).into_response()
-        }
-        Err((code, payload)) => (code, Json(payload)).into_response(),
-    }
-}
-
-/// One MCP call: `{ "method": "yatagarasu.plan", "params": { "source_ref": "decision_id" } }`.
-#[derive(serde::Deserialize)]
-struct McpRequest {
-    method: String,
-    #[serde(default)]
-    params: serde_json::Value,
+    serve(
+        ServeConfig {
+            tool: TOOL,
+            default_port: 8093,
+            default_version: env!("CARGO_PKG_VERSION"),
+            git_sha: option_env!("GIT_SHA").unwrap_or("dev"),
+        },
+        Handler { ai },
+    )
+    .await;
 }
 
 /// Params for `yatagarasu.plan`. `source_ref` is the upstream Decision id,
@@ -347,7 +265,7 @@ mod tests {
     #[tokio::test]
     async fn plan_builds_plan_brief_with_decision_provenance() {
         let out = dispatch(
-            None::<&ai::OpenAiProvider>,
+            None::<&OpenAiProvider>,
             "yatagarasu.plan",
             json!({"source_ref": "decision_abc"}),
         )
@@ -360,11 +278,11 @@ mod tests {
 
     #[tokio::test]
     async fn read_unsupported_and_unknown_method_rejected() {
-        let (code, _) = dispatch(None::<&ai::OpenAiProvider>, "yatagarasu.read", json!({}))
+        let (code, _) = dispatch(None::<&OpenAiProvider>, "yatagarasu.read", json!({}))
             .await
             .unwrap_err();
         assert_eq!(code, StatusCode::NOT_IMPLEMENTED);
-        let (code, _) = dispatch(None::<&ai::OpenAiProvider>, "yatagarasu.nope", json!({}))
+        let (code, _) = dispatch(None::<&OpenAiProvider>, "yatagarasu.nope", json!({}))
             .await
             .unwrap_err();
         assert_eq!(code, StatusCode::BAD_REQUEST);
@@ -372,7 +290,7 @@ mod tests {
 
     #[tokio::test]
     async fn plan_rejects_bad_params() {
-        let (code, _) = dispatch(None::<&ai::OpenAiProvider>, "yatagarasu.plan", json!({}))
+        let (code, _) = dispatch(None::<&OpenAiProvider>, "yatagarasu.plan", json!({}))
             .await
             .unwrap_err();
         assert_eq!(code, StatusCode::BAD_REQUEST);
@@ -531,7 +449,7 @@ mod tests {
                 json!({"tasks": [{"task_id": TaskId::new().to_string(), "title": "t"}]}),
             ),
         ] {
-            let (code, body) = dispatch(None::<&ai::OpenAiProvider>, method, params)
+            let (code, body) = dispatch(None::<&OpenAiProvider>, method, params)
                 .await
                 .unwrap_err();
             assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE, "{method}");

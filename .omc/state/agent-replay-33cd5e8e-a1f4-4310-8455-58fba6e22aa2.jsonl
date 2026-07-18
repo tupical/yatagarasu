@@ -1,0 +1,3 @@
+{"t":0,"agent":"ayataga","agent_type":"yatagarasu-hardening","event":"agent_start","parent_mode":"none"}
+{"t":0,"agent":"aintake","agent_type":"intake-via-torii","event":"agent_stop","success":true,"synthetic":true,"telemetry_status":"unmatched_stop","reason":"SubagentStop arrived without a matching SubagentStart; native Agent/Task start telemetry was not observed."}
+{"t":0,"agent":"aintake","agent_type":"intake-via-torii","event":"agent_start","parent_mode":"none"}

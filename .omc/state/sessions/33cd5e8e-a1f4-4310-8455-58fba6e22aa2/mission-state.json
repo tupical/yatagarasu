@@ -1,0 +1,71 @@
+{
+  "updatedAt": "2026-07-13T15:16:52.681Z",
+  "missions": [
+    {
+      "id": "session:33cd5e8e-a1f4-4310-8455-58fba6e22aa2:none",
+      "source": "session",
+      "name": "none",
+      "objective": "Session mission",
+      "createdAt": "2026-07-13T15:16:11.718Z",
+      "updatedAt": "2026-07-13T15:16:52.681Z",
+      "status": "running",
+      "workerCount": 2,
+      "taskCounts": {
+        "total": 2,
+        "pending": 0,
+        "blocked": 0,
+        "inProgress": 1,
+        "completed": 1,
+        "failed": 0
+      },
+      "agents": [
+        {
+          "name": "yatagarasu-hardening:ayataga",
+          "role": "yatagarasu-hardening",
+          "ownership": "ayatagarasu-hardening-7773fa3f097c7e78",
+          "status": "done",
+          "currentStep": null,
+          "latestUpdate": "completed",
+          "completedSummary": null,
+          "updatedAt": "2026-07-13T15:16:37.855Z"
+        },
+        {
+          "name": "intake-via-torii:aintake",
+          "role": "intake-via-torii",
+          "ownership": "aintake-via-torii-282f379e36da39f8",
+          "status": "running",
+          "currentStep": null,
+          "latestUpdate": null,
+          "completedSummary": null,
+          "updatedAt": "2026-07-13T15:16:52.681Z"
+        }
+      ],
+      "timeline": [
+        {
+          "id": "session-start:ayatagarasu-hardening-7773fa3f097c7e78:2026-07-13T15:16:11.718Z",
+          "at": "2026-07-13T15:16:11.718Z",
+          "kind": "update",
+          "agent": "yatagarasu-hardening:ayataga",
+          "detail": "started yatagarasu-hardening:ayataga",
+          "sourceKey": "session-start:ayatagarasu-hardening-7773fa3f097c7e78"
+        },
+        {
+          "id": "session-stop:aintake-via-torii-282f379e36da39f8:2026-07-13T15:16:37.855Z",
+          "at": "2026-07-13T15:16:37.855Z",
+          "kind": "completion",
+          "agent": "yatagarasu-hardening:ayataga",
+          "detail": "completed",
+          "sourceKey": "session-stop:aintake-via-torii-282f379e36da39f8"
+        },
+        {
+          "id": "session-start:aintake-via-torii-282f379e36da39f8:2026-07-13T15:16:52.681Z",
+          "at": "2026-07-13T15:16:52.681Z",
+          "kind": "update",
+          "agent": "intake-via-torii:aintake",
+          "detail": "started intake-via-torii:aintake",
+          "sourceKey": "session-start:aintake-via-torii-282f379e36da39f8"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "agents": [
+    {
+      "agent_id": "ayatagarasu-hardening-7773fa3f097c7e78",
+      "agent_type": "yatagarasu-hardening",
+      "started_at": "2026-07-13T15:16:11.718Z",
+      "parent_mode": "none",
+      "status": "running"
+    },
+    {
+      "agent_id": "aintake-via-torii-282f379e36da39f8",
+      "agent_type": "intake-via-torii",
+      "started_at": "2026-07-13T15:16:52.681Z",
+      "parent_mode": "none",
+      "status": "running",
+      "synthetic": true,
+      "telemetry_status": "unmatched_stop",
+      "telemetry_note": "SubagentStop arrived without a matching SubagentStart; native Agent/Task start telemetry was not observed."
+    }
+  ],
+  "total_spawned": 2,
+  "total_completed": 1,
+  "total_failed": 0,
+  "last_updated": "2026-07-13T15:16:52.783Z"
+}
