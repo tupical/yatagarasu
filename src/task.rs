@@ -11,70 +11,17 @@
 
 use crate::time::Timestamp;
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 // ── IDs ─────────────────────────────────────────────────────────────────
 
-/// Strongly-typed UUIDv7 identifier for a task.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct TaskId(pub Uuid);
-
-impl TaskId {
-    pub fn new() -> Self {
-        Self(Uuid::now_v7())
-    }
+layer_kit::newtype_id! {
+    /// Strongly-typed UUIDv7 identifier for a task.
+    pub struct TaskId("task");
 }
 
-impl Default for TaskId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl std::fmt::Display for TaskId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "task_{}", self.0)
-    }
-}
-
-impl std::str::FromStr for TaskId {
-    type Err = uuid::Error;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let trimmed = s.strip_prefix("task_").unwrap_or(s);
-        Ok(Self(Uuid::parse_str(trimmed)?))
-    }
-}
-
-/// Strongly-typed UUIDv7 identifier for a project.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ProjectId(pub Uuid);
-
-impl ProjectId {
-    pub fn new() -> Self {
-        Self(Uuid::now_v7())
-    }
-}
-
-impl Default for ProjectId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl std::fmt::Display for ProjectId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "prj_{}", self.0)
-    }
-}
-
-impl std::str::FromStr for ProjectId {
-    type Err = uuid::Error;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let trimmed = s.strip_prefix("prj_").unwrap_or(s);
-        Ok(Self(Uuid::parse_str(trimmed)?))
-    }
+layer_kit::newtype_id! {
+    /// Strongly-typed UUIDv7 identifier for a project.
+    pub struct ProjectId("prj");
 }
 
 // ── Enums ───────────────────────────────────────────────────────────────
