@@ -41,6 +41,65 @@ impl McpHandler for Handler {
     ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
         dispatch(self.ai.as_ref(), method, params).await
     }
+
+    fn tools(&self) -> Vec<serde_json::Value> {
+        tools()
+    }
+}
+
+/// Tool descriptors for `tools/list` — one per method actually handled by
+/// [`dispatch`] (`yatagarasu.read`/`yatagarasu.enrich` are NOT_IMPLEMENTED,
+/// so they are omitted).
+fn tools() -> Vec<serde_json::Value> {
+    vec![
+        json!({
+            "name": "yatagarasu_plan",
+            "description": "Build a typed PlanBrief linked to an upstream Decision.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source_ref": {"type": "string"}
+                },
+                "required": ["source_ref"]
+            }
+        }),
+        json!({
+            "name": "yatagarasu_decompose",
+            "description": "AI decomposition: split a parent task into an ordered set of sub-task drafts.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "parent": {"type": "string"},
+                    "task_context": {"type": "string"},
+                    "hint": {"type": "string"}
+                },
+                "required": ["parent", "task_context"]
+            }
+        }),
+        json!({
+            "name": "yatagarasu_scope",
+            "description": "AI rescope: rewrite a task's title/description broader or narrower.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "object"},
+                    "direction": {"type": "string"}
+                },
+                "required": ["task", "direction"]
+            }
+        }),
+        json!({
+            "name": "yatagarasu_analyze_complexity",
+            "description": "Batch AI scoring: one model call producing a ComplexityHintDraft per task.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tasks": {"type": "array", "items": {"type": "object"}}
+                },
+                "required": ["tasks"]
+            }
+        }),
+    ]
 }
 
 #[tokio::main]
@@ -286,6 +345,21 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(code, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn tools_list_names_are_all_dispatchable() {
+        for tool in tools() {
+            let name = tool["name"].as_str().unwrap();
+            let method = name.replacen('_', ".", 1);
+            let (_, body) = dispatch(None::<&OpenAiProvider>, &method, json!({}))
+                .await
+                .expect_err("empty params must not satisfy any real method");
+            assert_ne!(
+                body["error"], "unknown_method",
+                "{method} must be a real dispatch method"
+            );
+        }
     }
 
     #[tokio::test]
