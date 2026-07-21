@@ -14,9 +14,7 @@
 //! brief ([`PlanBrief`] / [`check_readiness`]).
 //!
 //! # Contract
-//! - The planning layer never writes to storage. `decompose` returns a
-//!   [`SplitDraft`] and `scope` returns an [`UpdateDraft`]; the caller
-//!   (the host) maps them onto daruma `Command`s and dispatches.
+//! - Domain primitives stay storage-agnostic; the server persists plan briefs.
 //! - All JSON is built with [`serde_json::json!`]; no string concatenation.
 //! - Errors propagate as [`PlanningError`].
 
@@ -50,3 +48,22 @@ pub use decompose::{decompose_task, SplitDraft};
 pub use plan::plan_ai;
 pub use plan_brief::{check_readiness, PlanBrief, PlanReadinessReport};
 pub use scope::{scope_task, ScopeDirection, UpdateDraft};
+
+/// Start a plan brief with the decisions that it must preserve as lineage.
+pub fn brief_from_decisions(decision_ids: &[String]) -> PlanBrief {
+    PlanBrief {
+        decisions_made: decision_ids.to_vec(),
+        ..PlanBrief::default()
+    }
+}
+
+#[cfg(test)]
+mod adapter_tests {
+    use super::*;
+
+    #[test]
+    fn decision_ids_are_preserved_in_brief() {
+        let brief = brief_from_decisions(&["dec_1".into(), "dec_2".into()]);
+        assert_eq!(brief.decisions_made, ["dec_1", "dec_2"]);
+    }
+}

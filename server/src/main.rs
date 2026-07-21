@@ -21,6 +21,7 @@ use layer_kit::ai::extract_ai_config;
 use layer_kit::auth::Claims;
 use layer_kit::openai::{AiConfig, OpenAiProvider};
 use layer_kit::serve::{serve, McpHandler, ServeConfig};
+use layer_kit::store::Store;
 use serde_json::json;
 use yatagarasu::{PlanBrief, ScopeDirection, Task, TaskBrief, TaskId};
 
@@ -31,6 +32,7 @@ struct Handler {
     /// `None` when OPENAI_API_KEY is unset — AI methods then answer
     /// `ai_not_configured` instead of panicking at call time.
     ai: Option<OpenAiProvider>,
+    store: Store,
 }
 
 impl McpHandler for Handler {
@@ -42,9 +44,9 @@ impl McpHandler for Handler {
     ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
         if let Some(cfg) = extract_ai_config(&mut params) {
             let provider = OpenAiProvider::new(cfg);
-            dispatch_with_ai(Some(&provider), true, method, params).await
+            dispatch_with_ai(&self.store, Some(&provider), true, method, params).await
         } else {
-            dispatch(self.ai.as_ref(), method, params).await
+            dispatch(&self.store, self.ai.as_ref(), method, params).await
         }
     }
 
@@ -54,8 +56,7 @@ impl McpHandler for Handler {
 }
 
 /// Tool descriptors for `tools/list` — one per method actually handled by
-/// [`dispatch`] (`yatagarasu.read`/`yatagarasu.enrich` are NOT_IMPLEMENTED,
-/// so they are omitted).
+/// [`dispatch`] (`yatagarasu.enrich` remains unsupported).
 fn tools() -> Vec<serde_json::Value> {
     vec![
         json!({
@@ -105,6 +106,15 @@ fn tools() -> Vec<serde_json::Value> {
                 "required": ["tasks"]
             }
         }),
+        json!({
+            "name": "yatagarasu_read",
+            "description": "Get a persisted PlanBrief by its source decision id.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"]
+            }
+        }),
     ]
 }
 
@@ -114,8 +124,14 @@ async fn main() {
 
     let ai = AiConfig::from_env().map(OpenAiProvider::new);
     if ai.is_none() {
-        tracing::warn!("OPENAI_API_KEY unset — env-backed AI methods will answer ai_not_configured");
+        tracing::warn!(
+            "OPENAI_API_KEY unset — env-backed AI methods will answer ai_not_configured"
+        );
     }
+    let store = Store::from_env(TOOL).await.unwrap_or_else(|e| {
+        tracing::error!(error = %e, "failed to open yatagarasu store");
+        std::process::exit(1);
+    });
 
     serve(
         ServeConfig {
@@ -124,7 +140,7 @@ async fn main() {
             default_version: env!("CARGO_PKG_VERSION"),
             git_sha: option_env!("GIT_SHA").unwrap_or("dev"),
         },
-        Handler { ai },
+        Handler { ai, store },
     )
     .await;
 }
@@ -134,6 +150,18 @@ async fn main() {
 #[derive(serde::Deserialize)]
 struct PlanParams {
     source_ref: String,
+}
+
+#[derive(serde::Deserialize)]
+struct ReadParams {
+    id: String,
+}
+
+fn storage_error(e: impl std::fmt::Display) -> (StatusCode, serde_json::Value) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        json!({"error": "storage_error", "detail": e.to_string()}),
+    )
 }
 
 /// Params for `yatagarasu.decompose` — the lib's AI decomposition
@@ -221,14 +249,16 @@ fn ai_error(e: yatagarasu::PlanningError) -> (StatusCode, serde_json::Value) {
 /// tests). Read/enrichment methods belong to host adapters, not this
 /// stateless server.
 async fn dispatch<P: yatagarasu::AiProvider>(
+    store: &Store,
     ai: Option<&P>,
     method: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
-    dispatch_with_ai(ai, false, method, params).await
+    dispatch_with_ai(store, ai, false, method, params).await
 }
 
 async fn dispatch_with_ai<P: yatagarasu::AiProvider>(
+    store: &Store,
     ai: Option<&P>,
     request_ai: bool,
     method: &str,
@@ -238,6 +268,7 @@ async fn dispatch_with_ai<P: yatagarasu::AiProvider>(
         "yatagarasu.plan" => {
             let context = params.clone();
             let p: PlanParams = serde_json::from_value(params).map_err(invalid_params)?;
+            let store_id = p.source_ref.clone();
             let brief = if request_ai {
                 let provider = ai.ok_or_else(ai_not_configured)?;
                 let mut brief = yatagarasu::plan_ai(provider, &context).await.map_err(|e| {
@@ -249,11 +280,12 @@ async fn dispatch_with_ai<P: yatagarasu::AiProvider>(
                 brief.decisions_made = vec![p.source_ref];
                 brief
             } else {
-                PlanBrief {
-                    decisions_made: vec![p.source_ref],
-                    ..PlanBrief::default()
-                }
+                yatagarasu::brief_from_decisions(&[p.source_ref])
             };
+            store
+                .put("plan_brief", &store_id, &brief)
+                .await
+                .map_err(storage_error)?;
             Ok(json!({ "method": "yatagarasu.plan", "plan_brief": brief }))
         }
         "yatagarasu.decompose" => {
@@ -313,9 +345,24 @@ async fn dispatch_with_ai<P: yatagarasu::AiProvider>(
                 .map_err(ai_error)?;
             Ok(json!({ "method": "yatagarasu.analyze_complexity", "hints": hints }))
         }
-        "yatagarasu.read" | "yatagarasu.enrich" => Err((
+        "yatagarasu.read" => {
+            let p: ReadParams = serde_json::from_value(params).map_err(invalid_params)?;
+            let brief: Option<PlanBrief> = store
+                .get("plan_brief", &p.id)
+                .await
+                .map_err(storage_error)?;
+            brief
+                .map(|brief| json!({"method": "yatagarasu.read", "plan_brief": brief}))
+                .ok_or_else(|| {
+                    (
+                        StatusCode::NOT_FOUND,
+                        json!({"error": "not_found", "detail": p.id}),
+                    )
+                })
+        }
+        "yatagarasu.enrich" => Err((
             StatusCode::NOT_IMPLEMENTED,
-            json!({"error": "unsupported", "detail": "yatagarasu-server is stateless (OSS skeleton has no store); read/enrich need a host adapter"}),
+            json!({"error": "unsupported", "detail": "yatagarasu.enrich needs a host adapter"}),
         )),
         other => Err((
             StatusCode::BAD_REQUEST,
@@ -327,7 +374,42 @@ async fn dispatch_with_ai<P: yatagarasu::AiProvider>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use yatagarasu::{AiError, AiOutput, AiRequest, ToolCall};
+
+    static DB_SEQ: AtomicU64 = AtomicU64::new(1);
+
+    fn db_path() -> String {
+        std::env::temp_dir()
+            .join(format!(
+                "yatagarasu-server-{}-{}.db",
+                std::process::id(),
+                DB_SEQ.fetch_add(1, Ordering::Relaxed)
+            ))
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    async fn test_store() -> Store {
+        Store::open(&db_path()).await.unwrap()
+    }
+
+    async fn dispatch<P: yatagarasu::AiProvider>(
+        ai: Option<&P>,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
+        super::dispatch(&test_store().await, ai, method, params).await
+    }
+
+    async fn dispatch_with_ai<P: yatagarasu::AiProvider>(
+        ai: Option<&P>,
+        request_ai: bool,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
+        super::dispatch_with_ai(&test_store().await, ai, request_ai, method, params).await
+    }
 
     /// Fake provider returning a fixed tool call — lets dispatch tests
     /// exercise the AI methods without network.
@@ -400,11 +482,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_unsupported_and_unknown_method_rejected() {
+    async fn read_and_unknown_method_rejected() {
         let (code, _) = dispatch(None::<&OpenAiProvider>, "yatagarasu.read", json!({}))
             .await
             .unwrap_err();
-        assert_eq!(code, StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(code, StatusCode::BAD_REQUEST);
         let (code, _) = dispatch(None::<&OpenAiProvider>, "yatagarasu.nope", json!({}))
             .await
             .unwrap_err();
@@ -412,17 +494,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn plan_brief_persists_across_restart_and_write_errors_surface() {
+        let path = db_path();
+        let store = Store::open(&path).await.unwrap();
+        super::dispatch(
+            &store,
+            None::<&OpenAiProvider>,
+            "yatagarasu.plan",
+            json!({"source_ref": "decision_1"}),
+        )
+        .await
+        .unwrap();
+        drop(store);
+
+        let reopened = Store::open(&path).await.unwrap();
+        let got = super::dispatch(
+            &reopened,
+            None::<&OpenAiProvider>,
+            "yatagarasu.read",
+            json!({"id": "decision_1"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(got["plan_brief"]["decisions_made"], json!(["decision_1"]));
+
+        reopened.pool().close().await;
+        let (code, body) = super::dispatch(
+            &reopened,
+            None::<&OpenAiProvider>,
+            "yatagarasu.plan",
+            json!({"source_ref": "decision_2"}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(code, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"], "storage_error");
+    }
+
+    #[tokio::test]
     async fn tools_list_names_are_all_dispatchable() {
         for tool in tools() {
             let name = tool["name"].as_str().unwrap();
             let method = name.replacen('_', ".", 1);
-            let (_, body) = dispatch(None::<&OpenAiProvider>, &method, json!({}))
-                .await
-                .expect_err("empty params must not satisfy any real method");
-            assert_ne!(
-                body["error"], "unknown_method",
-                "{method} must be a real dispatch method"
-            );
+            if let Err((_, body)) = dispatch(None::<&OpenAiProvider>, &method, json!({})).await {
+                assert_ne!(body["error"], "unknown_method", "{method} must be real");
+            }
         }
     }
 
