@@ -24,6 +24,7 @@ pub mod ai;
 pub mod complexity;
 pub mod decompose;
 pub mod error;
+pub mod plan;
 pub mod plan_brief;
 pub mod prompts;
 pub mod scope;
@@ -46,5 +47,6 @@ pub use complexity::{
     MAX_BATCH_TASKS,
 };
 pub use decompose::{decompose_task, SplitDraft};
+pub use plan::plan_ai;
 pub use plan_brief::{check_readiness, PlanBrief, PlanReadinessReport};
 pub use scope::{scope_task, ScopeDirection, UpdateDraft};

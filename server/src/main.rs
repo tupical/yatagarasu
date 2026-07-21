@@ -17,6 +17,7 @@
 //! (see `layer_kit::openai`); without a key they answer `ai_not_configured`.
 
 use axum::http::StatusCode;
+use layer_kit::ai::extract_ai_config;
 use layer_kit::auth::Claims;
 use layer_kit::openai::{AiConfig, OpenAiProvider};
 use layer_kit::serve::{serve, McpHandler, ServeConfig};
@@ -37,9 +38,14 @@ impl McpHandler for Handler {
         &self,
         _claims: &Claims,
         method: &str,
-        params: serde_json::Value,
+        mut params: serde_json::Value,
     ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
-        dispatch(self.ai.as_ref(), method, params).await
+        if let Some(cfg) = extract_ai_config(&mut params) {
+            let provider = OpenAiProvider::new(cfg);
+            dispatch_with_ai(Some(&provider), true, method, params).await
+        } else {
+            dispatch(self.ai.as_ref(), method, params).await
+        }
     }
 
     fn tools(&self) -> Vec<serde_json::Value> {
@@ -108,7 +114,7 @@ async fn main() {
 
     let ai = AiConfig::from_env().map(OpenAiProvider::new);
     if ai.is_none() {
-        tracing::warn!("OPENAI_API_KEY unset — AI methods (yatagarasu.decompose/scope/analyze_complexity) will answer ai_not_configured");
+        tracing::warn!("OPENAI_API_KEY unset — env-backed AI methods will answer ai_not_configured");
     }
 
     serve(
@@ -219,12 +225,34 @@ async fn dispatch<P: yatagarasu::AiProvider>(
     method: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
+    dispatch_with_ai(ai, false, method, params).await
+}
+
+async fn dispatch_with_ai<P: yatagarasu::AiProvider>(
+    ai: Option<&P>,
+    request_ai: bool,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
     match method {
         "yatagarasu.plan" => {
+            let context = params.clone();
             let p: PlanParams = serde_json::from_value(params).map_err(invalid_params)?;
-            let brief = PlanBrief {
-                decisions_made: vec![p.source_ref],
-                ..PlanBrief::default()
+            let brief = if request_ai {
+                let provider = ai.ok_or_else(ai_not_configured)?;
+                let mut brief = yatagarasu::plan_ai(provider, &context).await.map_err(|e| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        json!({"error": "ai_error", "detail": e.to_string()}),
+                    )
+                })?;
+                brief.decisions_made = vec![p.source_ref];
+                brief
+            } else {
+                PlanBrief {
+                    decisions_made: vec![p.source_ref],
+                    ..PlanBrief::default()
+                }
             };
             Ok(json!({ "method": "yatagarasu.plan", "plan_brief": brief }))
         }
@@ -235,14 +263,10 @@ async fn dispatch<P: yatagarasu::AiProvider>(
                 return Err(ai_not_configured());
             };
             // Real AI operation: task context → SplitDraft (≥2 sub-tasks).
-            let draft = yatagarasu::decompose_task(
-                provider,
-                parent,
-                &p.task_context,
-                p.hint.as_deref(),
-            )
-            .await
-            .map_err(ai_error)?;
+            let draft =
+                yatagarasu::decompose_task(provider, parent, &p.task_context, p.hint.as_deref())
+                    .await
+                    .map_err(ai_error)?;
             Ok(json!({ "method": "yatagarasu.decompose", "split_draft": draft }))
         }
         "yatagarasu.scope" => {
@@ -333,6 +357,46 @@ mod tests {
         let brief = &out["plan_brief"];
         assert_eq!(out["method"], "yatagarasu.plan");
         assert_eq!(brief["decisions_made"], json!(["decision_abc"]));
+    }
+
+    #[tokio::test]
+    async fn request_ai_builds_plan_without_leaking_secret() {
+        let fake = FakeTool {
+            name: "build_plan_brief",
+            args: r#"{"goal":"Ship auth","in_scope":["API"],"completion_criteria":["Tests pass"],"daruma_target":"one plan"}"#.into(),
+        };
+        let mut params = json!({
+            "source_ref": "decision_abc",
+            "decision": {"statement": "Ship auth"},
+            "ai": {"api_key": "sk-secret", "base_url": "https://ai.test/v1", "model": "test"}
+        });
+        assert!(extract_ai_config(&mut params).is_some());
+        let out = dispatch_with_ai(Some(&fake), true, "yatagarasu.plan", params)
+            .await
+            .unwrap();
+        assert_eq!(out["plan_brief"]["goal"], "Ship auth");
+        assert_eq!(out["plan_brief"]["decisions_made"], json!(["decision_abc"]));
+        assert!(!out.to_string().contains("sk-secret"));
+    }
+
+    #[tokio::test]
+    async fn request_ai_plan_failure_is_ai_error() {
+        struct Failing;
+        impl yatagarasu::AiProvider for Failing {
+            async fn respond(&self, _req: AiRequest) -> Result<Vec<AiOutput>, AiError> {
+                Err(AiError::new("boom"))
+            }
+        }
+        let (code, body) = dispatch_with_ai(
+            Some(&Failing),
+            true,
+            "yatagarasu.plan",
+            json!({"source_ref": "decision_abc"}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(code, StatusCode::BAD_GATEWAY);
+        assert_eq!(body["error"], "ai_error");
     }
 
     #[tokio::test]
