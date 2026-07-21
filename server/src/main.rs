@@ -44,7 +44,14 @@ impl McpHandler for Handler {
     ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
         if let Some(cfg) = extract_ai_config(&mut params) {
             let provider = OpenAiProvider::new(cfg);
-            dispatch_with_ai(&self.store, Some(&provider), true, method, params).await
+            dispatch_with_ai(
+                &self.store,
+                Some(&provider),
+                Some(provider.model()),
+                method,
+                params,
+            )
+            .await
         } else {
             dispatch(&self.store, self.ai.as_ref(), method, params).await
         }
@@ -254,13 +261,13 @@ async fn dispatch<P: yatagarasu::AiProvider>(
     method: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
-    dispatch_with_ai(store, ai, false, method, params).await
+    dispatch_with_ai(store, ai, None, method, params).await
 }
 
 async fn dispatch_with_ai<P: yatagarasu::AiProvider>(
     store: &Store,
     ai: Option<&P>,
-    request_ai: bool,
+    model: Option<&str>,
     method: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
@@ -269,24 +276,32 @@ async fn dispatch_with_ai<P: yatagarasu::AiProvider>(
             let context = params.clone();
             let p: PlanParams = serde_json::from_value(params).map_err(invalid_params)?;
             let store_id = p.source_ref.clone();
-            let brief = if request_ai {
+            let (brief, usage) = if let Some(model) = model {
                 let provider = ai.ok_or_else(ai_not_configured)?;
-                let mut brief = yatagarasu::plan_ai(provider, &context).await.map_err(|e| {
+                let (mut brief, usage) = yatagarasu::plan_ai(provider, &context).await.map_err(|e| {
                     (
                         StatusCode::BAD_GATEWAY,
                         json!({"error": "ai_error", "detail": e.to_string()}),
                     )
                 })?;
                 brief.decisions_made = vec![p.source_ref];
-                brief
+                (brief, Some((model, usage)))
             } else {
-                yatagarasu::brief_from_decisions(&[p.source_ref])
+                (yatagarasu::brief_from_decisions(&[p.source_ref]), None)
             };
             store
                 .put("plan_brief", &store_id, &brief)
                 .await
                 .map_err(storage_error)?;
-            Ok(json!({ "method": "yatagarasu.plan", "plan_brief": brief }))
+            let mut out = json!({ "method": "yatagarasu.plan", "plan_brief": brief });
+            if let Some((model, usage)) = usage {
+                let mut meta = json!({"model": model});
+                if let Some(usage) = usage {
+                    meta["usage"] = json!(usage);
+                }
+                out["_meta"] = meta;
+            }
+            Ok(out)
         }
         "yatagarasu.decompose" => {
             let p: DecomposeParams = serde_json::from_value(params).map_err(invalid_params)?;
@@ -375,7 +390,7 @@ async fn dispatch_with_ai<P: yatagarasu::AiProvider>(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use yatagarasu::{AiError, AiOutput, AiRequest, ToolCall};
+    use yatagarasu::{AiError, AiOutput, AiRequest, AiUsage, ToolCall};
 
     static DB_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -408,7 +423,14 @@ mod tests {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
-        super::dispatch_with_ai(&test_store().await, ai, request_ai, method, params).await
+        super::dispatch_with_ai(
+            &test_store().await,
+            ai,
+            request_ai.then_some("test"),
+            method,
+            params,
+        )
+        .await
     }
 
     /// Fake provider returning a fixed tool call — lets dispatch tests
@@ -425,6 +447,17 @@ mod tests {
                 arguments: self.args.clone(),
             })])
         }
+
+        async fn respond_with_usage(
+            &self,
+            req: AiRequest,
+        ) -> Result<(Vec<AiOutput>, Option<AiUsage>), AiError> {
+            Ok((self.respond(req).await?, Some(AiUsage {
+                input_tokens: Some(123),
+                output_tokens: Some(45),
+                total_tokens: Some(168),
+            })))
+        }
     }
 
     #[tokio::test]
@@ -439,6 +472,7 @@ mod tests {
         let brief = &out["plan_brief"];
         assert_eq!(out["method"], "yatagarasu.plan");
         assert_eq!(brief["decisions_made"], json!(["decision_abc"]));
+        assert!(out.get("_meta").is_none());
     }
 
     #[tokio::test]
@@ -453,11 +487,26 @@ mod tests {
             "ai": {"api_key": "sk-secret", "base_url": "https://ai.test/v1", "model": "test"}
         });
         assert!(extract_ai_config(&mut params).is_some());
-        let out = dispatch_with_ai(Some(&fake), true, "yatagarasu.plan", params)
+        let store = test_store().await;
+        let out = super::dispatch_with_ai(
+            &store,
+            Some(&fake),
+            Some("test"),
+            "yatagarasu.plan",
+            params,
+        )
             .await
             .unwrap();
         assert_eq!(out["plan_brief"]["goal"], "Ship auth");
         assert_eq!(out["plan_brief"]["decisions_made"], json!(["decision_abc"]));
+        assert_eq!(out["_meta"]["model"], "test");
+        assert_eq!(out["_meta"]["usage"]["total_tokens"], 168);
+        let stored: serde_json::Value = store
+            .get("plan_brief", "decision_abc")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.get("_meta").is_none());
         assert!(!out.to_string().contains("sk-secret"));
     }
 

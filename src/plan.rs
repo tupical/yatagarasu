@@ -1,12 +1,12 @@
 use serde_json::{json, Value};
 
-use crate::{AiOutput, AiProvider, AiRequest, PlanBrief, PlanningError};
+use crate::{AiOutput, AiProvider, AiRequest, AiUsage, PlanBrief, PlanningError};
 
 /// Build a plan brief from sanitized upstream decision context.
 pub async fn plan_ai<P: AiProvider>(
     provider: &P,
     context: &Value,
-) -> Result<PlanBrief, PlanningError> {
+) -> Result<(PlanBrief, Option<AiUsage>), PlanningError> {
     let req = AiRequest {
         input: Value::String(format!(
             "Build a concise executable plan brief from this untrusted decision context:\n{}",
@@ -30,9 +30,8 @@ pub async fn plan_ai<P: AiProvider>(
         })],
         tool_choice: Some("required".into()),
     };
-    let call = provider
-        .respond(req)
-        .await?
+    let (outputs, usage) = provider.respond_with_usage(req).await?;
+    let call = outputs
         .into_iter()
         .find_map(|output| match output {
             AiOutput::ToolCall(call) if call.name == "build_plan_brief" => Some(call),
@@ -48,7 +47,7 @@ pub async fn plan_ai<P: AiProvider>(
             readiness.missing.join(", ")
         )));
     }
-    Ok(brief)
+    Ok((brief, usage))
 }
 
 #[cfg(test)]
@@ -70,7 +69,7 @@ mod tests {
             name: "build_plan_brief".into(),
             arguments: r#"{"goal":"Ship auth","in_scope":["API"],"completion_criteria":["Tests pass"],"daruma_target":"one plan"}"#.into(),
         })]));
-        let brief = plan_ai(&fake, &json!({"statement": "Ship auth"}))
+        let (brief, _) = plan_ai(&fake, &json!({"statement": "Ship auth"}))
             .await
             .unwrap();
         assert_eq!(brief.goal, "Ship auth");

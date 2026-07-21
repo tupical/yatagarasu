@@ -32,7 +32,7 @@ pub mod time;
 // ── Seam re-exports ─────────────────────────────────────────────────────────────
 pub use ai::{
     report_complexity_tool, rescope_task_tool, split_task_tool, wrap_untrusted, AiError, AiOutput,
-    AiProvider, AiRequest, ToolCall,
+    AiProvider, AiRequest, AiUsage, ToolCall,
 };
 pub use error::PlanningError;
 pub use prompts::PromptRegistry;
