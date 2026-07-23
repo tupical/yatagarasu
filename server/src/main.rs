@@ -294,6 +294,11 @@ async fn dispatch_with_ai<P: yatagarasu::AiProvider>(
                 .await
                 .map_err(storage_error)?;
             let mut out = json!({ "method": "yatagarasu.plan", "plan_brief": brief });
+            for field in ["decision", "sensing_item"] {
+                if let Some(value) = context.get(field) {
+                    out[field] = value.clone();
+                }
+            }
             if let Some((model, usage)) = usage {
                 let mut meta = json!({"model": model});
                 if let Some(usage) = usage {
@@ -499,6 +504,7 @@ mod tests {
             .unwrap();
         assert_eq!(out["plan_brief"]["goal"], "Ship auth");
         assert_eq!(out["plan_brief"]["decisions_made"], json!(["decision_abc"]));
+        assert_eq!(out["decision"]["statement"], "Ship auth");
         assert_eq!(out["_meta"]["model"], "test");
         assert_eq!(out["_meta"]["usage"]["total_tokens"], 168);
         let stored: serde_json::Value = store
