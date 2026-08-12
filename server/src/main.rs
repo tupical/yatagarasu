@@ -122,6 +122,11 @@ fn tools() -> Vec<serde_json::Value> {
                 "required": ["id"]
             }
         }),
+        json!({
+            "name": "yatagarasu_enrich",
+            "description": "Enrich a plan through a host-provided adapter.",
+            "inputSchema": {"type": "object", "properties": {}}
+        }),
     ]
 }
 
@@ -251,6 +256,15 @@ fn ai_error(e: yatagarasu::PlanningError) -> (StatusCode, serde_json::Value) {
     }
 }
 
+const METHODS: &[&str] = &[
+    "yatagarasu.plan",
+    "yatagarasu.decompose",
+    "yatagarasu.scope",
+    "yatagarasu.analyze_complexity",
+    "yatagarasu.read",
+    "yatagarasu.enrich",
+];
+
 /// Pure MCP dispatch over the yatagarasu planning lib — no auth, no HTTP, so
 /// it is unit-testable directly (AI methods get a fake `AiProvider` in
 /// tests). Read/enrichment methods belong to host adapters, not this
@@ -271,6 +285,12 @@ async fn dispatch_with_ai<P: yatagarasu::AiProvider>(
     method: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
+    if !METHODS.contains(&method) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            json!({"error": "unknown_method", "detail": method}),
+        ));
+    }
     match method {
         "yatagarasu.plan" => {
             let context = params.clone();
@@ -595,6 +615,11 @@ mod tests {
                 assert_ne!(body["error"], "unknown_method", "{method} must be real");
             }
         }
+    }
+
+    #[test]
+    fn tools_catalogue_matches_methods() {
+        layer_kit::test_support::assert_catalogue_matches(&tools(), METHODS);
     }
 
     #[tokio::test]
