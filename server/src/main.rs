@@ -6,10 +6,9 @@
 //! Routes:
 //!   GET  /healthz   — open; liveness + version for the platform registry.
 //!   POST /v1/mcp    — requires a valid platform token; planning surface
-//!                     (`yatagarasu.plan` builds a typed PlanBrief via the lib;
-//!                     `yatagarasu.decompose` / `yatagarasu.scope` /
-//!                     `yatagarasu.analyze_complexity` run the lib's AI
-//!                     planning operations).
+//!                     (`yatagarasu.plan` / `yatagarasu.decompose` /
+//!                     `yatagarasu.scope` / `yatagarasu.analyze_complexity`
+//!                     run the lib's AI planning operations).
 //!
 //! Env: YATAGARASU_PORT (default 8093), YATAGARASU_PLATFORM_SECRET (HMAC key;
 //! if unset, /v1/mcp is closed), YATAGARASU_VERSION (defaults to the crate
@@ -46,14 +45,21 @@ impl McpHandler for Handler {
             let provider = OpenAiProvider::new(cfg);
             dispatch_with_ai(
                 &self.store,
-                Some(&provider),
-                Some(provider.model()),
+                Some((&provider, provider.model())),
                 method,
                 params,
             )
             .await
         } else {
-            dispatch(&self.store, self.ai.as_ref(), method, params).await
+            dispatch_with_ai(
+                &self.store,
+                self.ai
+                    .as_ref()
+                    .map(|provider| (provider, provider.model())),
+                method,
+                params,
+            )
+            .await
         }
     }
 
@@ -63,12 +69,12 @@ impl McpHandler for Handler {
 }
 
 /// Tool descriptors for `tools/list` — one per method actually handled by
-/// [`dispatch`] (`yatagarasu.enrich` remains unsupported).
+/// [`dispatch_with_ai`] (`yatagarasu.enrich` remains unsupported).
 fn tools() -> Vec<serde_json::Value> {
     vec![
         json!({
             "name": "yatagarasu_plan",
-            "description": "Build a typed PlanBrief linked to an upstream Decision.",
+            "description": "AI planning: build a typed PlanBrief linked to an upstream Decision.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -265,23 +271,9 @@ const METHODS: &[&str] = &[
     "yatagarasu.enrich",
 ];
 
-/// Pure MCP dispatch over the yatagarasu planning lib — no auth, no HTTP, so
-/// it is unit-testable directly (AI methods get a fake `AiProvider` in
-/// tests). Read/enrichment methods belong to host adapters, not this
-/// stateless server.
-async fn dispatch<P: yatagarasu::AiProvider>(
-    store: &Store,
-    ai: Option<&P>,
-    method: &str,
-    params: serde_json::Value,
-) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
-    dispatch_with_ai(store, ai, None, method, params).await
-}
-
 async fn dispatch_with_ai<P: yatagarasu::AiProvider>(
     store: &Store,
-    ai: Option<&P>,
-    model: Option<&str>,
+    ai: Option<(&P, &str)>,
     method: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
@@ -295,20 +287,21 @@ async fn dispatch_with_ai<P: yatagarasu::AiProvider>(
         "yatagarasu.plan" => {
             let context = params.clone();
             let p: PlanParams = serde_json::from_value(params).map_err(invalid_params)?;
+            if p.source_ref.trim().is_empty() {
+                return Err(invalid_params("source_ref must not be empty"));
+            }
             let store_id = p.source_ref.clone();
-            let (brief, usage) = if let Some(model) = model {
-                let provider = ai.ok_or_else(ai_not_configured)?;
-                let (mut brief, usage) = yatagarasu::plan_ai(provider, &context).await.map_err(|e| {
-                    (
+            let (provider, model) = ai.ok_or_else(ai_not_configured)?;
+            let (mut brief, usage) = yatagarasu::plan_ai(provider, &context)
+                .await
+                .map_err(|e| match e {
+                    yatagarasu::PlanningError::Validation(m) => (
                         StatusCode::BAD_GATEWAY,
-                        json!({"error": "ai_error", "detail": e.to_string()}),
-                    )
+                        json!({"error": "ai_upstream", "detail": m}),
+                    ),
+                    other => ai_error(other),
                 })?;
-                brief.decisions_made = vec![p.source_ref];
-                (brief, Some((model, usage)))
-            } else {
-                (yatagarasu::brief_from_decisions(&[p.source_ref]), None)
-            };
+            brief.decisions_made = vec![p.source_ref];
             store
                 .put("plan_brief", &store_id, &brief)
                 .await
@@ -319,21 +312,17 @@ async fn dispatch_with_ai<P: yatagarasu::AiProvider>(
                     out[field] = value.clone();
                 }
             }
-            if let Some((model, usage)) = usage {
-                let mut meta = json!({"model": model});
-                if let Some(usage) = usage {
-                    meta["usage"] = json!(usage);
-                }
-                out["_meta"] = meta;
+            let mut meta = json!({"model": model});
+            if let Some(usage) = usage {
+                meta["usage"] = json!(usage);
             }
+            out["_meta"] = meta;
             Ok(out)
         }
         "yatagarasu.decompose" => {
             let p: DecomposeParams = serde_json::from_value(params).map_err(invalid_params)?;
             let parent: TaskId = p.parent.parse().map_err(invalid_params)?;
-            let Some(provider) = ai else {
-                return Err(ai_not_configured());
-            };
+            let (provider, _) = ai.ok_or_else(ai_not_configured)?;
             // Real AI operation: task context → SplitDraft (≥2 sub-tasks).
             let draft =
                 yatagarasu::decompose_task(provider, parent, &p.task_context, p.hint.as_deref())
@@ -345,9 +334,7 @@ async fn dispatch_with_ai<P: yatagarasu::AiProvider>(
             let p: ScopeParams = serde_json::from_value(params).map_err(invalid_params)?;
             let direction = ScopeDirection::parse(&p.direction).map_err(ai_error)?;
             let id: TaskId = p.task.id.parse().map_err(invalid_params)?;
-            let Some(provider) = ai else {
-                return Err(ai_not_configured());
-            };
+            let (provider, _) = ai.ok_or_else(ai_not_configured)?;
             // Rebuild the lib's Task; only id/title/description feed the op.
             let now = yatagarasu::time::now();
             let task = Task {
@@ -376,9 +363,7 @@ async fn dispatch_with_ai<P: yatagarasu::AiProvider>(
                     description: t.description,
                 });
             }
-            let Some(provider) = ai else {
-                return Err(ai_not_configured());
-            };
+            let (provider, _) = ai.ok_or_else(ai_not_configured)?;
             // Real AI operation: one batch call → ComplexityHintDraft per task.
             let hints = yatagarasu::analyze_complexity_batch(provider, tasks)
                 .await
@@ -439,19 +424,9 @@ mod tests {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
-        super::dispatch(&test_store().await, ai, method, params).await
-    }
-
-    async fn dispatch_with_ai<P: yatagarasu::AiProvider>(
-        ai: Option<&P>,
-        request_ai: bool,
-        method: &str,
-        params: serde_json::Value,
-    ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
         super::dispatch_with_ai(
             &test_store().await,
-            ai,
-            request_ai.then_some("test"),
+            ai.map(|provider| (provider, "test")),
             method,
             params,
         )
@@ -487,8 +462,12 @@ mod tests {
 
     #[tokio::test]
     async fn plan_builds_plan_brief_with_decision_provenance() {
+        let fake = FakeTool {
+            name: "build_plan_brief",
+            args: r#"{"goal":"Ship auth","in_scope":["API"],"completion_criteria":["Tests pass"],"daruma_target":"one plan"}"#.into(),
+        };
         let out = dispatch(
-            None::<&OpenAiProvider>,
+            Some(&fake),
             "yatagarasu.plan",
             json!({"source_ref": "decision_abc"}),
         )
@@ -497,7 +476,7 @@ mod tests {
         let brief = &out["plan_brief"];
         assert_eq!(out["method"], "yatagarasu.plan");
         assert_eq!(brief["decisions_made"], json!(["decision_abc"]));
-        assert!(out.get("_meta").is_none());
+        assert_eq!(out["_meta"]["model"], "test");
     }
 
     #[tokio::test]
@@ -515,13 +494,12 @@ mod tests {
         let store = test_store().await;
         let out = super::dispatch_with_ai(
             &store,
-            Some(&fake),
-            Some("test"),
+            Some((&fake, "test")),
             "yatagarasu.plan",
             params,
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         assert_eq!(out["plan_brief"]["goal"], "Ship auth");
         assert_eq!(out["plan_brief"]["decisions_made"], json!(["decision_abc"]));
         assert_eq!(out["decision"]["statement"], "Ship auth");
@@ -544,16 +522,32 @@ mod tests {
                 Err(AiError::new("boom"))
             }
         }
-        let (code, body) = dispatch_with_ai(
+        let (code, body) = dispatch(
             Some(&Failing),
-            true,
             "yatagarasu.plan",
             json!({"source_ref": "decision_abc"}),
         )
         .await
         .unwrap_err();
         assert_eq!(code, StatusCode::BAD_GATEWAY);
-        assert_eq!(body["error"], "ai_error");
+        assert_eq!(body["error"], "ai_upstream");
+    }
+
+    #[tokio::test]
+    async fn incomplete_plan_brief_is_ai_upstream() {
+        let fake = FakeTool {
+            name: "build_plan_brief",
+            args: r#"{"goal":"Ship auth","in_scope":[],"completion_criteria":[],"daruma_target":""}"#.into(),
+        };
+        let (code, body) = dispatch(
+            Some(&fake),
+            "yatagarasu.plan",
+            json!({"source_ref": "decision_abc"}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(code, StatusCode::BAD_GATEWAY);
+        assert_eq!(body["error"], "ai_upstream");
     }
 
     #[tokio::test]
@@ -570,11 +564,15 @@ mod tests {
 
     #[tokio::test]
     async fn plan_brief_persists_across_restart_and_write_errors_surface() {
+        let fake = FakeTool {
+            name: "build_plan_brief",
+            args: r#"{"goal":"Ship auth","in_scope":["API"],"completion_criteria":["Tests pass"],"daruma_target":"one plan"}"#.into(),
+        };
         let path = db_path();
         let store = Store::open(&path).await.unwrap();
-        super::dispatch(
+        super::dispatch_with_ai(
             &store,
-            None::<&OpenAiProvider>,
+            Some((&fake, "test")),
             "yatagarasu.plan",
             json!({"source_ref": "decision_1"}),
         )
@@ -583,9 +581,9 @@ mod tests {
         drop(store);
 
         let reopened = Store::open(&path).await.unwrap();
-        let got = super::dispatch(
+        let got = super::dispatch_with_ai(
             &reopened,
-            None::<&OpenAiProvider>,
+            None::<(&OpenAiProvider, &str)>,
             "yatagarasu.read",
             json!({"id": "decision_1"}),
         )
@@ -594,9 +592,9 @@ mod tests {
         assert_eq!(got["plan_brief"]["decisions_made"], json!(["decision_1"]));
 
         reopened.pool().close().await;
-        let (code, body) = super::dispatch(
+        let (code, body) = super::dispatch_with_ai(
             &reopened,
-            None::<&OpenAiProvider>,
+            Some((&fake, "test")),
             "yatagarasu.plan",
             json!({"source_ref": "decision_2"}),
         )
@@ -604,6 +602,32 @@ mod tests {
         .unwrap_err();
         assert_eq!(code, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(body["error"], "storage_error");
+    }
+
+    #[tokio::test]
+    async fn plan_without_provider_is_503_and_does_not_persist() {
+        let store = test_store().await;
+        let (code, body) = super::dispatch_with_ai(
+            &store,
+            None::<(&OpenAiProvider, &str)>,
+            "yatagarasu.plan",
+            json!({"source_ref": "decision_abc"}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"], "ai_not_configured");
+
+        let (code, body) = super::dispatch_with_ai(
+            &store,
+            None::<(&OpenAiProvider, &str)>,
+            "yatagarasu.read",
+            json!({"id": "decision_abc"}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(code, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"], "not_found");
     }
 
     #[tokio::test]
@@ -624,10 +648,21 @@ mod tests {
 
     #[tokio::test]
     async fn plan_rejects_bad_params() {
-        let (code, _) = dispatch(None::<&OpenAiProvider>, "yatagarasu.plan", json!({}))
+        let (code, body) = dispatch(None::<&OpenAiProvider>, "yatagarasu.plan", json!({}))
             .await
             .unwrap_err();
         assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "invalid_params");
+
+        let (code, body) = dispatch(
+            None::<&OpenAiProvider>,
+            "yatagarasu.plan",
+            json!({"source_ref": "  "}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "invalid_params");
     }
 
     #[tokio::test]

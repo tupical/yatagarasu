@@ -7,11 +7,11 @@
 //! provider and any daruma / decisions adapters when wiring the layer
 //! into its architecture — implementations live only inside the host.
 //!
-//! The crate owns the AI **planning** operations — `decompose` (a task →
-//! at least 2 sub-task drafts), `scope` (broaden/narrow a task by rewriting
-//! its title + description) and `analyze_complexity` (batch-score a plan's
-//! tasks for decomposition fan-out) — plus the deterministic plan readiness
-//! brief ([`PlanBrief`] / [`check_readiness`]).
+//! The crate owns the AI **planning** operations — [`plan_ai`] (decision
+//! context → [`PlanBrief`]), `decompose` (a task → at least 2 sub-task drafts),
+//! `scope` (broaden/narrow a task by rewriting its title + description) and
+//! `analyze_complexity` (batch-score a plan's tasks for decomposition fan-out)
+//! — plus the deterministic plan readiness check ([`check_readiness`]).
 //!
 //! # Contract
 //! - Domain primitives stay storage-agnostic; the server persists plan briefs.
@@ -48,22 +48,3 @@ pub use decompose::{decompose_task, SplitDraft};
 pub use plan::plan_ai;
 pub use plan_brief::{check_readiness, PlanBrief, PlanReadinessReport};
 pub use scope::{scope_task, ScopeDirection, UpdateDraft};
-
-/// Start a plan brief with the decisions that it must preserve as lineage.
-pub fn brief_from_decisions(decision_ids: &[String]) -> PlanBrief {
-    PlanBrief {
-        decisions_made: decision_ids.to_vec(),
-        ..PlanBrief::default()
-    }
-}
-
-#[cfg(test)]
-mod adapter_tests {
-    use super::*;
-
-    #[test]
-    fn decision_ids_are_preserved_in_brief() {
-        let brief = brief_from_decisions(&["dec_1".into(), "dec_2".into()]);
-        assert_eq!(brief.decisions_made, ["dec_1", "dec_2"]);
-    }
-}
