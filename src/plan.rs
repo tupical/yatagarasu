@@ -15,14 +15,25 @@ pub async fn plan_ai<P: AiProvider>(
         tools: vec![json!({
             "type": "function",
             "name": "build_plan_brief",
-            "description": "Return the required PlanBrief fields.",
+            "description": "Return all PlanBrief fields.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "goal": {"type": "string"},
                     "in_scope": {"type": "array", "items": {"type": "string"}},
                     "completion_criteria": {"type": "array", "items": {"type": "string"}},
-                    "daruma_target": {"type": "string"}
+                    "daruma_target": {"type": "string"},
+                    "why_now": {"type": "string"},
+                    "decisions_made": {"type": "array", "items": {"type": "string"}},
+                    "risks": {"type": "array", "items": {"type": "string"}},
+                    "constraints": {"type": "array", "items": {"type": "string"}},
+                    "knowledge_base": {"type": "array", "items": {"type": "string"}},
+                    "unverified_hypotheses": {"type": "array", "items": {"type": "string"}},
+                    "rejected_alternatives": {"type": "array", "items": {"type": "string"}},
+                    "out_of_scope": {"type": "array", "items": {"type": "string"}},
+                    "dependencies": {"type": "array", "items": {"type": "string"}},
+                    "required_artifacts": {"type": "array", "items": {"type": "string"}},
+                    "project_structure": {"type": "string"}
                 },
                 "required": ["goal", "in_scope", "completion_criteria", "daruma_target"],
                 "additionalProperties": false
@@ -74,6 +85,57 @@ mod tests {
             .unwrap();
         assert_eq!(brief.goal, "Ship auth");
         assert_eq!(brief.in_scope, ["API"]);
+    }
+
+    #[tokio::test]
+    async fn maps_full_plan_brief_and_passes_readiness() {
+        let fake = Fake(Ok(vec![AiOutput::ToolCall(ToolCall {
+            name: "build_plan_brief".into(),
+            arguments: json!({
+                "goal": "Ship auth",
+                "in_scope": ["API"],
+                "completion_criteria": ["Tests pass"],
+                "daruma_target": "one plan",
+                "why_now": "Customers need it",
+                "decisions_made": ["Use OAuth"],
+                "risks": ["Provider outage"],
+                "constraints": ["No downtime"],
+                "knowledge_base": ["Auth ADR"],
+                "unverified_hypotheses": ["Existing tokens migrate"],
+                "rejected_alternatives": ["Session cookies"],
+                "out_of_scope": ["Billing"],
+                "dependencies": ["Identity provider"],
+                "required_artifacts": ["Migration guide"],
+                "project_structure": "existing project"
+            })
+            .to_string(),
+        })]));
+
+        let (brief, _) = plan_ai(&fake, &json!({"statement": "Ship auth"}))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            brief,
+            PlanBrief {
+                goal: "Ship auth".into(),
+                in_scope: vec!["API".into()],
+                completion_criteria: vec!["Tests pass".into()],
+                daruma_target: "one plan".into(),
+                why_now: Some("Customers need it".into()),
+                decisions_made: vec!["Use OAuth".into()],
+                risks: vec!["Provider outage".into()],
+                constraints: vec!["No downtime".into()],
+                knowledge_base: vec!["Auth ADR".into()],
+                unverified_hypotheses: vec!["Existing tokens migrate".into()],
+                rejected_alternatives: vec!["Session cookies".into()],
+                out_of_scope: vec!["Billing".into()],
+                dependencies: vec!["Identity provider".into()],
+                required_artifacts: vec!["Migration guide".into()],
+                project_structure: Some("existing project".into()),
+            }
+        );
+        assert!(crate::check_readiness(&brief).is_ready);
     }
 
     #[tokio::test]
