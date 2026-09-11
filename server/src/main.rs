@@ -7,7 +7,7 @@
 //!   GET  /healthz   — open; liveness + version for the platform registry.
 //!   POST /v1/mcp    — requires a valid platform token; planning surface
 //!                     (`yatagarasu.plan` / `yatagarasu.decompose` /
-//!                     `yatagarasu.scope` / `yatagarasu.analyze_complexity`
+//!                     `yatagarasu.scope`
 //!                     run the lib's AI planning operations).
 //!
 //! Env: YATAGARASU_PORT (default 8093), YATAGARASU_PLATFORM_SECRET (HMAC key;
@@ -22,7 +22,7 @@ use layer_kit::openai::{AiConfig, OpenAiProvider};
 use layer_kit::serve::{serve, McpHandler, ServeConfig};
 use layer_kit::store::Store;
 use serde_json::json;
-use yatagarasu::{PlanBrief, ScopeDirection, Task, TaskBrief, TaskId};
+use yatagarasu::{PlanBrief, ScopeDirection, Task, TaskId};
 
 const TOOL: &str = "yatagarasu";
 
@@ -106,17 +106,6 @@ fn tools() -> Vec<serde_json::Value> {
                     "direction": {"type": "string"}
                 },
                 "required": ["task", "direction"]
-            }
-        }),
-        json!({
-            "name": "yatagarasu_analyze_complexity",
-            "description": "Batch AI scoring: one model call producing a ComplexityHintDraft per task.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "tasks": {"type": "array", "items": {"type": "object"}}
-                },
-                "required": ["tasks"]
             }
         }),
         json!({
@@ -216,22 +205,6 @@ struct ScopeTaskInput {
     description: String,
 }
 
-/// Params for `yatagarasu.analyze_complexity` — the lib's batch AI scoring
-/// ([`analyze_complexity_batch`](yatagarasu::analyze_complexity_batch)):
-/// one model call → one `ComplexityHintDraft` per task.
-#[derive(serde::Deserialize)]
-struct AnalyzeParams {
-    tasks: Vec<AnalyzeTaskInput>,
-}
-
-#[derive(serde::Deserialize)]
-struct AnalyzeTaskInput {
-    task_id: String,
-    title: String,
-    #[serde(default)]
-    description: String,
-}
-
 fn invalid_params(e: impl std::fmt::Display) -> (StatusCode, serde_json::Value) {
     (
         StatusCode::BAD_REQUEST,
@@ -266,7 +239,6 @@ const METHODS: &[&str] = &[
     "yatagarasu.plan",
     "yatagarasu.decompose",
     "yatagarasu.scope",
-    "yatagarasu.analyze_complexity",
     "yatagarasu.read",
     "yatagarasu.enrich",
 ];
@@ -292,15 +264,16 @@ async fn dispatch_with_ai<P: yatagarasu::AiProvider>(
             }
             let store_id = p.source_ref.clone();
             let (provider, model) = ai.ok_or_else(ai_not_configured)?;
-            let (mut brief, usage) = yatagarasu::plan_ai(provider, &context)
-                .await
-                .map_err(|e| match e {
-                    yatagarasu::PlanningError::Validation(m) => (
-                        StatusCode::BAD_GATEWAY,
-                        json!({"error": "ai_upstream", "detail": m}),
-                    ),
-                    other => ai_error(other),
-                })?;
+            let (mut brief, usage) =
+                yatagarasu::plan_ai(provider, &context)
+                    .await
+                    .map_err(|e| match e {
+                        yatagarasu::PlanningError::Validation(m) => (
+                            StatusCode::BAD_GATEWAY,
+                            json!({"error": "ai_upstream", "detail": m}),
+                        ),
+                        other => ai_error(other),
+                    })?;
             brief.decisions_made = vec![p.source_ref];
             store
                 .put("plan_brief", &store_id, &brief)
@@ -352,23 +325,6 @@ async fn dispatch_with_ai<P: yatagarasu::AiProvider>(
                 .await
                 .map_err(ai_error)?;
             Ok(json!({ "method": "yatagarasu.scope", "update_draft": draft }))
-        }
-        "yatagarasu.analyze_complexity" => {
-            let p: AnalyzeParams = serde_json::from_value(params).map_err(invalid_params)?;
-            let mut tasks = Vec::with_capacity(p.tasks.len());
-            for t in p.tasks {
-                tasks.push(TaskBrief {
-                    task_id: t.task_id.parse().map_err(invalid_params)?,
-                    title: t.title,
-                    description: t.description,
-                });
-            }
-            let (provider, _) = ai.ok_or_else(ai_not_configured)?;
-            // Real AI operation: one batch call → ComplexityHintDraft per task.
-            let hints = yatagarasu::analyze_complexity_batch(provider, tasks)
-                .await
-                .map_err(ai_error)?;
-            Ok(json!({ "method": "yatagarasu.analyze_complexity", "hints": hints }))
         }
         "yatagarasu.read" => {
             let p: ReadParams = serde_json::from_value(params).map_err(invalid_params)?;
@@ -452,11 +408,14 @@ mod tests {
             &self,
             req: AiRequest,
         ) -> Result<(Vec<AiOutput>, Option<AiUsage>), AiError> {
-            Ok((self.respond(req).await?, Some(AiUsage {
-                input_tokens: Some(123),
-                output_tokens: Some(45),
-                total_tokens: Some(168),
-            })))
+            Ok((
+                self.respond(req).await?,
+                Some(AiUsage {
+                    input_tokens: Some(123),
+                    output_tokens: Some(45),
+                    total_tokens: Some(168),
+                }),
+            ))
         }
     }
 
@@ -492,14 +451,9 @@ mod tests {
         });
         assert!(extract_ai_config(&mut params).is_some());
         let store = test_store().await;
-        let out = super::dispatch_with_ai(
-            &store,
-            Some((&fake, "test")),
-            "yatagarasu.plan",
-            params,
-        )
-        .await
-        .unwrap();
+        let out = super::dispatch_with_ai(&store, Some((&fake, "test")), "yatagarasu.plan", params)
+            .await
+            .unwrap();
         assert_eq!(out["plan_brief"]["goal"], "Ship auth");
         assert_eq!(out["plan_brief"]["decisions_made"], json!(["decision_abc"]));
         assert_eq!(out["decision"]["statement"], "Ship auth");
@@ -537,7 +491,9 @@ mod tests {
     async fn incomplete_plan_brief_is_ai_upstream() {
         let fake = FakeTool {
             name: "build_plan_brief",
-            args: r#"{"goal":"Ship auth","in_scope":[],"completion_criteria":[],"daruma_target":""}"#.into(),
+            args:
+                r#"{"goal":"Ship auth","in_scope":[],"completion_criteria":[],"daruma_target":""}"#
+                    .into(),
         };
         let (code, body) = dispatch(
             Some(&fake),
@@ -753,53 +709,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn analyze_complexity_maps_hints() {
-        let a = TaskId::new();
-        let b = TaskId::new();
-        let args = format!(
-            r#"{{"hints":[
-                {{"task_id":"{a}","score":9,"recommended_subtasks":5,"expansion_hint":"split DB","reasoning":"big"}},
-                {{"task_id":"{b}","score":2,"recommended_subtasks":0,"expansion_hint":"ship as-is","reasoning":"small"}}
-            ]}}"#
-        );
-        let fake = FakeTool {
-            name: "report_complexity",
-            args,
-        };
-        let out = dispatch(
-            Some(&fake),
+    async fn complexity_stays_in_daruma() {
+        assert!(!tools()
+            .iter()
+            .any(|tool| tool["name"] == "yatagarasu_analyze_complexity"));
+        let (_, body) = dispatch(
+            None::<&OpenAiProvider>,
             "yatagarasu.analyze_complexity",
-            json!({"tasks": [
-                {"task_id": a.to_string(), "title": "Wire DB layer"},
-                {"task_id": b.to_string(), "title": "Add MCP tool", "description": "two lines"}
-            ]}),
-        )
-        .await
-        .expect("analyze_complexity must succeed");
-        assert_eq!(out["method"], "yatagarasu.analyze_complexity");
-        let hints = out["hints"].as_array().unwrap();
-        assert_eq!(hints.len(), 2);
-        assert_eq!(hints[0]["task_id"], json!(a.0));
-        assert_eq!(hints[0]["score"], 9);
-        assert_eq!(hints[0]["recommended_subtasks"], 5);
-        assert_eq!(hints[1]["task_id"], json!(b.0));
-    }
-
-    #[tokio::test]
-    async fn analyze_complexity_rejects_bad_task_id() {
-        let fake = FakeTool {
-            name: "report_complexity",
-            args: "{}".into(),
-        };
-        let (code, body) = dispatch(
-            Some(&fake),
-            "yatagarasu.analyze_complexity",
-            json!({"tasks": [{"task_id": "nope", "title": "t"}]}),
+            json!({}),
         )
         .await
         .unwrap_err();
-        assert_eq!(code, StatusCode::BAD_REQUEST);
-        assert_eq!(body["error"], "invalid_params");
+        assert_eq!(body["error"], "unknown_method");
     }
 
     #[tokio::test]
@@ -812,10 +733,6 @@ mod tests {
             (
                 "yatagarasu.scope",
                 json!({"task": {"id": TaskId::new().to_string(), "title": "t"}, "direction": "up"}),
-            ),
-            (
-                "yatagarasu.analyze_complexity",
-                json!({"tasks": [{"task_id": TaskId::new().to_string(), "title": "t"}]}),
             ),
         ] {
             let (code, body) = dispatch(None::<&OpenAiProvider>, method, params)

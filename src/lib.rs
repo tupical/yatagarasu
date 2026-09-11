@@ -7,11 +7,9 @@
 //! provider and any daruma / decisions adapters when wiring the layer
 //! into its architecture — implementations live only inside the host.
 //!
-//! The crate owns the AI **planning** operations — [`plan_ai`] (decision
-//! context → [`PlanBrief`]), `decompose` (a task → at least 2 sub-task drafts),
-//! `scope` (broaden/narrow a task by rewriting its title + description) and
-//! `analyze_complexity` (batch-score a plan's tasks for decomposition fan-out)
-//! — plus the deterministic plan readiness check ([`check_readiness`]).
+//! The crate implements [`plan_ai`] (decision context → [`PlanBrief`]),
+//! `decompose` (task → sub-task drafts), `scope` (rewrite a task's scope),
+//! and [`check_readiness`]. Batch complexity scoring is implemented in Daruma.
 //!
 //! # Contract
 //! - Domain primitives stay storage-agnostic; the server persists plan briefs.
@@ -19,7 +17,6 @@
 //! - Errors propagate as [`PlanningError`].
 
 pub mod ai;
-pub mod complexity;
 pub mod decompose;
 pub mod error;
 pub mod plan;
@@ -31,8 +28,8 @@ pub mod time;
 
 // ── Seam re-exports ─────────────────────────────────────────────────────────────
 pub use ai::{
-    report_complexity_tool, rescope_task_tool, split_task_tool, wrap_untrusted, AiError, AiOutput,
-    AiProvider, AiRequest, AiUsage, ToolCall,
+    rescope_task_tool, split_task_tool, wrap_untrusted, AiError, AiOutput, AiProvider, AiRequest,
+    AiUsage, ToolCall,
 };
 pub use error::PlanningError;
 pub use prompts::PromptRegistry;
@@ -40,10 +37,6 @@ pub use task::{Priority, ProjectId, Status, Task, TaskDraft, TaskId, TaskPatchDr
 pub use time::Timestamp;
 
 // ── Operation re-exports ────────────────────────────────────────────────────────
-pub use complexity::{
-    analyze_complexity_batch, build_analyze_complexity_prompt, ComplexityHintDraft, TaskBrief,
-    MAX_BATCH_TASKS,
-};
 pub use decompose::{decompose_task, SplitDraft};
 pub use plan::plan_ai;
 pub use plan_brief::{check_readiness, PlanBrief, PlanReadinessReport};

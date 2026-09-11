@@ -57,10 +57,9 @@ impl Registry {
             .0
             .get(name)
             .ok_or_else(|| PlanningError::ai(format!("prompt {name}: not found")))?;
-        let template = file
-            .variants
-            .get(variant)
-            .ok_or_else(|| PlanningError::ai(format!("prompt {name}/{variant}: unknown variant")))?;
+        let template = file.variants.get(variant).ok_or_else(|| {
+            PlanningError::ai(format!("prompt {name}/{variant}: unknown variant"))
+        })?;
 
         let label = format!("{name}/{variant}");
         let mut tt = TinyTemplate::new();
@@ -87,10 +86,6 @@ static PROMPTS: Lazy<Registry> = Lazy::new(|| {
     Registry::new(&[
         ("decompose", include_str!("../prompts/decompose.toml")),
         ("scope", include_str!("../prompts/scope.toml")),
-        (
-            "analyze_complexity",
-            include_str!("../prompts/analyze_complexity.toml"),
-        ),
     ])
 });
 
