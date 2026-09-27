@@ -37,22 +37,20 @@ struct Handler {
 impl McpHandler for Handler {
     async fn dispatch(
         &self,
-        _claims: &Claims,
+        claims: &Claims,
         method: &str,
         mut params: serde_json::Value,
     ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
+        // One store serves every tenant: confine this call to the token's scope.
+        let store = &self
+            .store
+            .scoped(&claims.workspace, claims.project.as_deref());
         if let Some(cfg) = extract_ai_config(&mut params) {
             let provider = OpenAiProvider::new(cfg);
-            dispatch_with_ai(
-                &self.store,
-                Some((&provider, provider.model())),
-                method,
-                params,
-            )
-            .await
+            dispatch_with_ai(store, Some((&provider, provider.model())), method, params).await
         } else {
             dispatch_with_ai(
-                &self.store,
+                store,
                 self.ai
                     .as_ref()
                     .map(|provider| (provider, provider.model())),
@@ -760,5 +758,49 @@ mod tests {
         .unwrap_err();
         assert_eq!(code, StatusCode::BAD_GATEWAY);
         assert_eq!(body["error"], "ai_upstream");
+    }
+
+    /// daruma 01a0d3bc: one layer server serves every tenant — the platform
+    /// token's workspace confines every read, so ws B never sees ws A's objects.
+    #[tokio::test]
+    async fn token_of_one_workspace_never_sees_another() {
+        let claims = |ws: &str| Claims {
+            workspace: ws.into(),
+            project: None,
+            tool: TOOL.into(),
+            exp: i64::MAX,
+        };
+        let store = test_store().await;
+        let fake = FakeTool {
+            name: "build_plan_brief",
+            args: r#"{"goal":"secret of A","in_scope":["API"],"completion_criteria":["Tests pass"],"daruma_target":"one plan"}"#.into(),
+        };
+        super::dispatch_with_ai(
+            &store.scoped("ws_a", None),
+            Some((&fake, "test")),
+            "yatagarasu.plan",
+            json!({"source_ref": "decision_a"}),
+        )
+        .await
+        .unwrap();
+        let handler = Handler { ai: None, store };
+        let (code, _) = handler
+            .dispatch(
+                &claims("ws_b"),
+                "yatagarasu.read",
+                json!({"id": "decision_a"}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(code, StatusCode::NOT_FOUND);
+        let a = handler
+            .dispatch(
+                &claims("ws_a"),
+                "yatagarasu.read",
+                json!({"id": "decision_a"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(a["plan_brief"]["goal"], "secret of A");
     }
 }
