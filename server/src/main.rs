@@ -266,13 +266,19 @@ async fn dispatch_with_ai<P: yatagarasu::AiProvider>(
                 yatagarasu::plan_ai(provider, &context)
                     .await
                     .map_err(|e| match e {
-                        yatagarasu::PlanningError::Validation(m) => (
+                        yatagarasu::PlanError::NeedsInput(r) => (
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            json!({"error": "needs_input", "missing": r.missing, "questions": r.questions}),
+                        ),
+                        yatagarasu::PlanError::Failed(yatagarasu::PlanningError::Validation(m)) => (
                             StatusCode::BAD_GATEWAY,
                             json!({"error": "ai_upstream", "detail": m}),
                         ),
-                        other => ai_error(other),
+                        yatagarasu::PlanError::Failed(other) => ai_error(other),
                     })?;
-            brief.decisions_made = vec![p.source_ref];
+            if !brief.decisions_made.contains(&p.source_ref) {
+                brief.decisions_made.push(p.source_ref);
+            }
             store
                 .put("plan_brief", &store_id, &brief)
                 .await
@@ -486,7 +492,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn incomplete_plan_brief_is_ai_upstream() {
+    async fn incomplete_plan_brief_is_needs_input() {
         let fake = FakeTool {
             name: "build_plan_brief",
             args:
@@ -500,8 +506,27 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert_eq!(code, StatusCode::BAD_GATEWAY);
-        assert_eq!(body["error"], "ai_upstream");
+        assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["error"], "needs_input");
+        assert!(body["missing"].as_array().unwrap().len() >= 3);
+        assert!(!body["questions"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unverified_hypothesis_is_needs_input_and_not_persisted() {
+        let fake = FakeTool {
+            name: "build_plan_brief",
+            args: r#"{"goal":"g","in_scope":["a"],"completion_criteria":["c"],"daruma_target":"t","unverified_hypotheses":["X"]}"#.into(),
+        };
+        let (code, body) = dispatch(
+            Some(&fake),
+            "yatagarasu.plan",
+            json!({"source_ref": "decision_abc"}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body["questions"][0].as_str().unwrap().contains('X'));
     }
 
     #[tokio::test]

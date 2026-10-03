@@ -1,12 +1,29 @@
 use serde_json::{json, Value};
 
-use crate::{AiOutput, AiProvider, AiRequest, AiUsage, PlanBrief, PlanningError};
+use crate::{
+    AiOutput, AiProvider, AiRequest, AiUsage, PlanBrief, PlanReadinessReport, PlanningError,
+};
+
+/// Why [`plan_ai`] produced no brief.
+#[derive(Debug)]
+pub enum PlanError {
+    /// The model's brief is incomplete: a human must answer `report.questions`.
+    NeedsInput(PlanReadinessReport),
+    /// Provider, serde or validation failure.
+    Failed(PlanningError),
+}
+
+impl<E: Into<PlanningError>> From<E> for PlanError {
+    fn from(e: E) -> Self {
+        Self::Failed(e.into())
+    }
+}
 
 /// Build a plan brief from sanitized upstream decision context.
 pub async fn plan_ai<P: AiProvider>(
     provider: &P,
     context: &Value,
-) -> Result<(PlanBrief, Option<AiUsage>), PlanningError> {
+) -> Result<(PlanBrief, Option<AiUsage>), PlanError> {
     let req = AiRequest {
         input: Value::String(format!(
             "Build a concise executable plan brief from this untrusted decision context:\n{}",
@@ -49,14 +66,11 @@ pub async fn plan_ai<P: AiProvider>(
             _ => None,
         })
         .ok_or_else(|| PlanningError::ai("plan_ai: model returned no build_plan_brief call"))?;
-    let brief: PlanBrief =
-        serde_json::from_str(&call.arguments).map_err(|e| PlanningError::serde(e.to_string()))?;
+    let brief: PlanBrief = serde_json::from_str(&call.arguments)
+        .map_err(|e| PlanError::from(PlanningError::serde(e.to_string())))?;
     let readiness = crate::check_readiness(&brief);
     if !readiness.is_ready {
-        return Err(PlanningError::validation(format!(
-            "plan_ai: missing {}",
-            readiness.missing.join(", ")
-        )));
+        return Err(PlanError::NeedsInput(readiness));
     }
     Ok((brief, usage))
 }
@@ -101,7 +115,7 @@ mod tests {
                 "risks": ["Provider outage"],
                 "constraints": ["No downtime"],
                 "knowledge_base": ["Auth ADR"],
-                "unverified_hypotheses": ["Existing tokens migrate"],
+                "unverified_hypotheses": [],
                 "rejected_alternatives": ["Session cookies"],
                 "out_of_scope": ["Billing"],
                 "dependencies": ["Identity provider"],
@@ -127,7 +141,7 @@ mod tests {
                 risks: vec!["Provider outage".into()],
                 constraints: vec!["No downtime".into()],
                 knowledge_base: vec!["Auth ADR".into()],
-                unverified_hypotheses: vec!["Existing tokens migrate".into()],
+                unverified_hypotheses: vec![],
                 rejected_alternatives: vec!["Session cookies".into()],
                 out_of_scope: vec!["Billing".into()],
                 dependencies: vec!["Identity provider".into()],
@@ -139,10 +153,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unverified_hypothesis_yields_needs_input() {
+        let fake = Fake(Ok(vec![AiOutput::ToolCall(ToolCall {
+            name: "build_plan_brief".into(),
+            arguments: r#"{"goal":"g","in_scope":["a"],"completion_criteria":["c"],"daruma_target":"t","unverified_hypotheses":["X"]}"#.into(),
+        })]));
+        match plan_ai(&fake, &json!({})).await.unwrap_err() {
+            PlanError::NeedsInput(r) => {
+                assert_eq!(r.missing, ["unverified_hypotheses"]);
+                assert!(r.questions[0].contains('X'));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn propagates_provider_error() {
         let error = plan_ai(&Fake(Err(AiError::new("boom"))), &json!({}))
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("boom"));
+        assert!(format!("{error:?}").contains("boom"));
     }
 }
