@@ -7,6 +7,8 @@
 # Variables:
 #   title       — current task title
 #   description — current task description (may be empty)
+#   status      — current task status (e.g. todo, in_progress)
+#   priority    — current task priority (p0..p3)
 
 [meta]
 name = "scope"
@@ -14,6 +16,9 @@ description = "Rescope a task up (broader) or down (narrower) by rewriting its t
 
 [variants.up]
 template = """You are a project-management assistant. Broaden the scope of the task below into an epic-style framing: keep the same intent, expand context and acceptance criteria, surface dependencies and risks. Call rescope_task with the rewritten title and description.
+
+Current status: { status }
+Current priority: { priority }
 
 Current title:
 { title }
@@ -23,6 +28,9 @@ Current description:
 
 [variants.down]
 template = """You are a project-management assistant. Narrow the scope of the task below into a single concrete next action: keep the same intent, trim away anything that belongs in follow-up tasks, and write the title as one short imperative sentence. Call rescope_task with the rewritten title and description.
+
+Current status: { status }
+Current priority: { priority }
 
 Current title:
 { title }
