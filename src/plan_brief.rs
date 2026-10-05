@@ -15,6 +15,10 @@
 //!
 //! **Recommended** (absence is noted but does not block):
 //! `why_now`, `decisions_made`, `risks`
+//!
+//! **Blocking when present**: every entry of `unverified_hypotheses` is an
+//! open question for a human; the brief is not ready until it is empty.
+//! Each blocking item also yields one entry in `questions`.
 
 use serde::{Deserialize, Serialize};
 
@@ -83,11 +87,15 @@ pub struct PlanBrief {
 /// `is_ready` is `true` iff `missing` is empty (all required fields filled).
 /// `missing` lists required fields that are absent/empty.
 /// `allowed` lists all fields that are filled (required or recommended).
+/// `questions` holds one human-readable question per blocking item (empty
+/// required field, each unverified hypothesis); empty iff `is_ready`.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PlanReadinessReport {
     pub is_ready: bool,
     pub missing: Vec<String>,
     pub allowed: Vec<String>,
+    #[serde(default)]
+    pub questions: Vec<String>,
 }
 
 // ── Logic ─────────────────────────────────────────────────────────────────────
@@ -123,10 +131,25 @@ pub fn check_readiness(brief: &PlanBrief) -> PlanReadinessReport {
     check_vec_opt(&brief.decisions_made, "decisions_made", &mut allowed);
     check_vec_opt(&brief.risks, "risks", &mut allowed);
 
+    let mut questions: Vec<String> = missing
+        .iter()
+        .map(|field| format!("Required field `{field}` is empty: please provide it."))
+        .collect();
+    if !brief.unverified_hypotheses.is_empty() {
+        missing.push("unverified_hypotheses".to_owned());
+        questions.extend(
+            brief
+                .unverified_hypotheses
+                .iter()
+                .map(|h| format!("Unverified hypothesis: {h} — is it confirmed?")),
+        );
+    }
+
     PlanReadinessReport {
         is_ready: missing.is_empty(),
         missing,
         allowed,
+        questions,
     }
 }
 
@@ -247,6 +270,24 @@ mod tests {
         let report = check_readiness(&brief);
         assert!(report.is_ready, "missing recommended fields must not block");
         assert!(report.missing.is_empty());
+    }
+
+    #[test]
+    fn unverified_hypotheses_block_with_a_question_each() {
+        let brief = PlanBrief {
+            unverified_hypotheses: vec!["X holds".into(), "Y holds".into()],
+            ..full_brief()
+        };
+        let report = check_readiness(&brief);
+        assert!(!report.is_ready);
+        assert_eq!(report.missing, ["unverified_hypotheses"]);
+        assert_eq!(report.questions.len(), 2);
+        assert!(report.questions[0].contains("X holds"));
+    }
+
+    #[test]
+    fn ready_report_has_no_questions() {
+        assert!(check_readiness(&full_brief()).questions.is_empty());
     }
 
     #[test]

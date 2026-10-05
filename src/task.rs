@@ -37,6 +37,17 @@ pub enum Priority {
     P3,
 }
 
+impl Priority {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Priority::P0 => "p0",
+            Priority::P1 => "p1",
+            Priority::P2 => "p2",
+            Priority::P3 => "p3",
+        }
+    }
+}
+
 /// Task status. Wire form: snake_case.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

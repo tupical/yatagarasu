@@ -51,6 +51,8 @@ pub struct UpdateDraft {
 struct ScopeCtx<'a> {
     title: &'a str,
     description: &'a str,
+    status: &'a str,
+    priority: &'a str,
 }
 
 /// Build the scope prompt. Pure — exposed for tests.
@@ -63,6 +65,8 @@ pub fn build_scope_prompt(task: &Task, direction: ScopeDirection) -> String {
         &ScopeCtx {
             title: &title,
             description: &description,
+            status: task.status.as_str(),
+            priority: task.priority.as_str(),
         },
     )
     .expect("bundled scope prompt is well-formed")
@@ -179,6 +183,31 @@ mod tests {
         let p = build_scope_prompt(&t, ScopeDirection::Down);
         assert!(p.contains("Wire login form"));
         assert!(p.contains("Narrow"));
+    }
+
+    /// Records the prompt the model receives.
+    struct Capture(std::sync::Mutex<String>);
+
+    impl AiProvider for Capture {
+        async fn respond(&self, req: AiRequest) -> Result<Vec<AiOutput>, AiError> {
+            *self.0.lock().unwrap() = req.input.as_str().unwrap_or_default().to_owned();
+            Ok(vec![AiOutput::ToolCall(ToolCall {
+                name: "rescope_task".into(),
+                arguments: r#"{"title":"t","description":"d"}"#.into(),
+            })])
+        }
+    }
+
+    #[tokio::test]
+    async fn scope_prompt_carries_real_status_and_priority() {
+        let mut task = sample_task();
+        task.status = Status::InProgress;
+        task.priority = Priority::P0;
+        let cap = Capture(Default::default());
+        scope_task(&cap, &task, ScopeDirection::Down).await.unwrap();
+        let prompt = cap.0.lock().unwrap().clone();
+        assert!(prompt.contains("in_progress"), "{prompt}");
+        assert!(prompt.contains("p0"), "{prompt}");
     }
 
     #[tokio::test]

@@ -67,7 +67,7 @@ impl McpHandler for Handler {
 }
 
 /// Tool descriptors for `tools/list` — one per method actually handled by
-/// [`dispatch_with_ai`] (`yatagarasu.enrich` remains unsupported).
+/// [`dispatch_with_ai`].
 fn tools() -> Vec<serde_json::Value> {
     vec![
         json!({
@@ -114,11 +114,6 @@ fn tools() -> Vec<serde_json::Value> {
                 "properties": {"id": {"type": "string"}},
                 "required": ["id"]
             }
-        }),
-        json!({
-            "name": "yatagarasu_enrich",
-            "description": "Enrich a plan through a host-provided adapter.",
-            "inputSchema": {"type": "object", "properties": {}}
         }),
     ]
 }
@@ -193,14 +188,21 @@ struct ScopeParams {
     direction: String,
 }
 
-/// Minimal task shape `scope` needs; the server rebuilds the lib's `Task`
-/// (status/priority/timestamps are unused by the operation).
+/// Minimal task shape `scope` needs; the server rebuilds the lib's `Task`.
+/// status/priority/project_id are optional context for the prompt; absent
+/// ones keep the lib defaults.
 #[derive(serde::Deserialize)]
 struct ScopeTaskInput {
     id: String,
     title: String,
     #[serde(default)]
     description: String,
+    #[serde(default)]
+    status: Option<yatagarasu::Status>,
+    #[serde(default)]
+    priority: Option<yatagarasu::Priority>,
+    #[serde(default)]
+    project_id: Option<String>,
 }
 
 fn invalid_params(e: impl std::fmt::Display) -> (StatusCode, serde_json::Value) {
@@ -238,7 +240,6 @@ const METHODS: &[&str] = &[
     "yatagarasu.decompose",
     "yatagarasu.scope",
     "yatagarasu.read",
-    "yatagarasu.enrich",
 ];
 
 async fn dispatch_with_ai<P: yatagarasu::AiProvider>(
@@ -266,13 +267,19 @@ async fn dispatch_with_ai<P: yatagarasu::AiProvider>(
                 yatagarasu::plan_ai(provider, &context)
                     .await
                     .map_err(|e| match e {
-                        yatagarasu::PlanningError::Validation(m) => (
+                        yatagarasu::PlanError::NeedsInput(r) => (
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            json!({"error": "needs_input", "missing": r.missing, "questions": r.questions}),
+                        ),
+                        yatagarasu::PlanError::Failed(yatagarasu::PlanningError::Validation(m)) => (
                             StatusCode::BAD_GATEWAY,
                             json!({"error": "ai_upstream", "detail": m}),
                         ),
-                        other => ai_error(other),
+                        yatagarasu::PlanError::Failed(other) => ai_error(other),
                     })?;
-            brief.decisions_made = vec![p.source_ref];
+            if !brief.decisions_made.contains(&p.source_ref) {
+                brief.decisions_made.push(p.source_ref);
+            }
             store
                 .put("plan_brief", &store_id, &brief)
                 .await
@@ -306,15 +313,21 @@ async fn dispatch_with_ai<P: yatagarasu::AiProvider>(
             let direction = ScopeDirection::parse(&p.direction).map_err(ai_error)?;
             let id: TaskId = p.task.id.parse().map_err(invalid_params)?;
             let (provider, _) = ai.ok_or_else(ai_not_configured)?;
-            // Rebuild the lib's Task; only id/title/description feed the op.
+            let project_id = p
+                .task
+                .project_id
+                .map(|v| v.parse())
+                .transpose()
+                .map_err(invalid_params)?;
+            // Rebuild the lib's Task from the caller's real context.
             let now = yatagarasu::time::now();
             let task = Task {
                 id,
-                project_id: None,
+                project_id,
                 title: p.task.title,
                 description: p.task.description,
-                status: Default::default(),
-                priority: Default::default(),
+                status: p.task.status.unwrap_or_default(),
+                priority: p.task.priority.unwrap_or_default(),
                 created_at: now,
                 updated_at: now,
             };
@@ -339,10 +352,6 @@ async fn dispatch_with_ai<P: yatagarasu::AiProvider>(
                     )
                 })
         }
-        "yatagarasu.enrich" => Err((
-            StatusCode::NOT_IMPLEMENTED,
-            json!({"error": "unsupported", "detail": "yatagarasu.enrich needs a host adapter"}),
-        )),
         other => Err((
             StatusCode::BAD_REQUEST,
             json!({"error": "unknown_method", "detail": other}),
@@ -486,7 +495,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn incomplete_plan_brief_is_ai_upstream() {
+    async fn incomplete_plan_brief_is_needs_input() {
         let fake = FakeTool {
             name: "build_plan_brief",
             args:
@@ -500,8 +509,27 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert_eq!(code, StatusCode::BAD_GATEWAY);
-        assert_eq!(body["error"], "ai_upstream");
+        assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["error"], "needs_input");
+        assert!(body["missing"].as_array().unwrap().len() >= 3);
+        assert!(!body["questions"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unverified_hypothesis_is_needs_input_and_not_persisted() {
+        let fake = FakeTool {
+            name: "build_plan_brief",
+            args: r#"{"goal":"g","in_scope":["a"],"completion_criteria":["c"],"daruma_target":"t","unverified_hypotheses":["X"]}"#.into(),
+        };
+        let (code, body) = dispatch(
+            Some(&fake),
+            "yatagarasu.plan",
+            json!({"source_ref": "decision_abc"}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body["questions"][0].as_str().unwrap().contains('X'));
     }
 
     #[tokio::test]
@@ -598,6 +626,12 @@ mod tests {
     #[test]
     fn tools_catalogue_matches_methods() {
         layer_kit::test_support::assert_catalogue_matches(&tools(), METHODS);
+    }
+
+    #[test]
+    fn enrich_is_not_advertised() {
+        assert!(!METHODS.contains(&"yatagarasu.enrich"));
+        assert!(!tools().iter().any(|t| t["name"] == "yatagarasu_enrich"));
     }
 
     #[tokio::test]
