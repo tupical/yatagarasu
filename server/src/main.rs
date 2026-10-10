@@ -235,6 +235,16 @@ fn ai_error(e: yatagarasu::PlanningError) -> (StatusCode, serde_json::Value) {
     }
 }
 
+/// `_meta` of an AI method's answer: the model always, usage when the
+/// provider reported it. Response-only — never persisted with the brief.
+fn ai_meta(model: &str, usage: Option<yatagarasu::AiUsage>) -> serde_json::Value {
+    let mut meta = json!({"model": model});
+    if let Some(usage) = usage {
+        meta["usage"] = json!(usage);
+    }
+    meta
+}
+
 const METHODS: &[&str] = &[
     "yatagarasu.plan",
     "yatagarasu.decompose",
@@ -290,29 +300,27 @@ async fn dispatch_with_ai<P: yatagarasu::AiProvider>(
                     out[field] = value.clone();
                 }
             }
-            let mut meta = json!({"model": model});
-            if let Some(usage) = usage {
-                meta["usage"] = json!(usage);
-            }
-            out["_meta"] = meta;
+            out["_meta"] = ai_meta(model, usage);
             Ok(out)
         }
         "yatagarasu.decompose" => {
             let p: DecomposeParams = serde_json::from_value(params).map_err(invalid_params)?;
             let parent: TaskId = p.parent.parse().map_err(invalid_params)?;
-            let (provider, _) = ai.ok_or_else(ai_not_configured)?;
+            let (provider, model) = ai.ok_or_else(ai_not_configured)?;
             // Real AI operation: task context → SplitDraft (≥2 sub-tasks).
-            let draft =
+            let (draft, usage) =
                 yatagarasu::decompose_task(provider, parent, &p.task_context, p.hint.as_deref())
                     .await
                     .map_err(ai_error)?;
-            Ok(json!({ "method": "yatagarasu.decompose", "split_draft": draft }))
+            let mut out = json!({ "method": "yatagarasu.decompose", "split_draft": draft });
+            out["_meta"] = ai_meta(model, usage);
+            Ok(out)
         }
         "yatagarasu.scope" => {
             let p: ScopeParams = serde_json::from_value(params).map_err(invalid_params)?;
             let direction = ScopeDirection::parse(&p.direction).map_err(ai_error)?;
             let id: TaskId = p.task.id.parse().map_err(invalid_params)?;
-            let (provider, _) = ai.ok_or_else(ai_not_configured)?;
+            let (provider, model) = ai.ok_or_else(ai_not_configured)?;
             let project_id = p
                 .task
                 .project_id
@@ -332,10 +340,12 @@ async fn dispatch_with_ai<P: yatagarasu::AiProvider>(
                 updated_at: now,
             };
             // Real AI operation: task → UpdateDraft (rewritten title/desc).
-            let draft = yatagarasu::scope_task(provider, &task, direction)
+            let (draft, usage) = yatagarasu::scope_task(provider, &task, direction)
                 .await
                 .map_err(ai_error)?;
-            Ok(json!({ "method": "yatagarasu.scope", "update_draft": draft }))
+            let mut out = json!({ "method": "yatagarasu.scope", "update_draft": draft });
+            out["_meta"] = ai_meta(model, usage);
+            Ok(out)
         }
         "yatagarasu.read" => {
             let p: ReadParams = serde_json::from_value(params).map_err(invalid_params)?;
@@ -669,6 +679,9 @@ mod tests {
         .await
         .expect("decompose must succeed");
         assert_eq!(out["method"], "yatagarasu.decompose");
+        // L-12: decompose reports model and token usage like plan.
+        assert_eq!(out["_meta"]["model"], "test");
+        assert!(out["_meta"]["usage"]["total_tokens"].is_u64(), "{out}");
         let draft = &out["split_draft"];
         assert_eq!(draft["parent"], json!(parent.0));
         let subs = draft["subtasks"].as_array().unwrap();
@@ -717,6 +730,9 @@ mod tests {
         )
         .await
         .expect("scope must succeed");
+        // L-12: scope reports model and token usage like plan.
+        assert_eq!(out["_meta"]["model"], "test");
+        assert!(out["_meta"]["usage"]["total_tokens"].is_u64(), "{out}");
         let draft = &out["update_draft"];
         assert_eq!(draft["id"], json!(id.0));
         assert_eq!(draft["patch"]["title"], "Ship auth epic");
