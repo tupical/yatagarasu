@@ -8,7 +8,7 @@
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::ai::{rescope_task_tool, wrap_untrusted, AiOutput, AiProvider, AiRequest};
+use crate::ai::{rescope_task_tool, wrap_untrusted, AiOutput, AiProvider, AiRequest, AiUsage};
 use crate::error::PlanningError;
 use crate::prompts::PromptRegistry;
 use crate::task::{Task, TaskId, TaskPatchDraft};
@@ -73,13 +73,14 @@ pub fn build_scope_prompt(task: &Task, direction: ScopeDirection) -> String {
 }
 
 /// Ask the model to rescope `task`, returning an [`UpdateDraft`] with the
-/// rewritten title + description. The concrete model client is supplied by
-/// the caller via [`AiProvider`].
+/// rewritten title + description, plus the provider's token usage when it
+/// reports one. The concrete model client is supplied by the caller via
+/// [`AiProvider`].
 pub async fn scope_task<P: AiProvider>(
     provider: &P,
     task: &Task,
     direction: ScopeDirection,
-) -> Result<UpdateDraft, PlanningError> {
+) -> Result<(UpdateDraft, Option<AiUsage>), PlanningError> {
     let prompt = build_scope_prompt(task, direction);
 
     let req = AiRequest {
@@ -88,7 +89,7 @@ pub async fn scope_task<P: AiProvider>(
         tool_choice: Some("required".into()),
     };
 
-    let outputs = provider.respond(req).await?;
+    let (outputs, usage) = provider.respond_with_usage(req).await?;
 
     let tc = outputs
         .into_iter()
@@ -115,7 +116,7 @@ pub async fn scope_task<P: AiProvider>(
         title: Some(title),
         description: Some(description),
     };
-    Ok(UpdateDraft { id: task.id, patch })
+    Ok((UpdateDraft { id: task.id, patch }, usage))
 }
 
 #[cfg(test)]
@@ -216,7 +217,7 @@ mod tests {
         let fake = FakeProvider {
             args: r#"{"title":"  Ship auth epic  ","description":"broader scope"}"#.into(),
         };
-        let draft = scope_task(&fake, &task, ScopeDirection::Up).await.unwrap();
+        let (draft, _) = scope_task(&fake, &task, ScopeDirection::Up).await.unwrap();
         assert_eq!(draft.id, task.id);
         assert_eq!(draft.patch.title.as_deref(), Some("Ship auth epic"));
         assert_eq!(draft.patch.description.as_deref(), Some("broader scope"));

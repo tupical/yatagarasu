@@ -8,7 +8,7 @@
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::ai::{split_task_tool, wrap_untrusted, AiOutput, AiProvider, AiRequest};
+use crate::ai::{split_task_tool, wrap_untrusted, AiOutput, AiProvider, AiRequest, AiUsage};
 use crate::error::PlanningError;
 use crate::prompts::PromptRegistry;
 use crate::task::{TaskDraft, TaskId};
@@ -75,14 +75,15 @@ pub fn build_decompose_prompt(task_context: &str, hint: Option<&str>) -> String 
 /// surfaced to the model as an "Additional guidance" block; when `None`, the
 /// prompt is unchanged from the no-hint baseline.
 ///
-/// Returns a [`SplitDraft`] with the parent id and at least 2 sub-tasks. The
-/// concrete model client is supplied by the caller via [`AiProvider`].
+/// Returns a [`SplitDraft`] with the parent id and at least 2 sub-tasks, plus
+/// the provider's token usage when it reports one. The concrete model client
+/// is supplied by the caller via [`AiProvider`].
 pub async fn decompose_task<P: AiProvider>(
     provider: &P,
     parent: TaskId,
     task_context: &str,
     hint: Option<&str>,
-) -> Result<SplitDraft, PlanningError> {
+) -> Result<(SplitDraft, Option<AiUsage>), PlanningError> {
     let prompt = build_decompose_prompt(task_context, hint);
 
     let req = AiRequest {
@@ -91,7 +92,7 @@ pub async fn decompose_task<P: AiProvider>(
         tool_choice: Some("required".into()),
     };
 
-    let outputs = provider.respond(req).await?;
+    let (outputs, usage) = provider.respond_with_usage(req).await?;
 
     let tc = outputs
         .into_iter()
@@ -133,7 +134,7 @@ pub async fn decompose_task<P: AiProvider>(
         subtasks.push(t);
     }
 
-    Ok(SplitDraft { parent, subtasks })
+    Ok((SplitDraft { parent, subtasks }, usage))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -207,9 +208,10 @@ mod tests {
                 .into(),
         };
         let parent = TaskId::new();
-        let draft = decompose_task(&fake, parent, "Build login page", None)
+        let (draft, usage) = decompose_task(&fake, parent, "Build login page", None)
             .await
             .unwrap();
+        assert_eq!(usage, None, "a provider without usage reports none");
         assert_eq!(draft.parent, parent);
         assert_eq!(draft.subtasks.len(), 2);
         assert_eq!(draft.subtasks[0].title, "Design schema");
