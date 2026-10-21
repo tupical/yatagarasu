@@ -57,6 +57,13 @@ pub struct PlanBrief {
     /// layer's `constraint` directives when wiring the pipeline.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub constraints: Vec<String>,
+    /// When the decision behind the plan should be revisited (ADR-0012).
+    /// Like `constraints`, not a §15 question but carried so the decision's
+    /// only formal "stop and reconsider" trigger reaches Actions; the host
+    /// fills it from the Decisions layer's `revisit_when`. Never blocks
+    /// readiness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revisit_when: Option<String>,
 
     // ── Optional ──────────────────────────────────────────────────────────────
     /// §15 Q4: What knowledge underpins the plan?
@@ -288,6 +295,24 @@ mod tests {
     #[test]
     fn ready_report_has_no_questions() {
         assert!(check_readiness(&full_brief()).questions.is_empty());
+    }
+
+    #[test]
+    fn revisit_when_roundtrips_and_does_not_block_readiness() {
+        let brief = PlanBrief {
+            revisit_when: Some("if write volume exceeds 50k/s".into()),
+            ..full_brief()
+        };
+        let json = serde_json::to_value(&brief).unwrap();
+        assert_eq!(json["revisit_when"], "if write volume exceeds 50k/s");
+        let back: PlanBrief = serde_json::from_value(json).unwrap();
+        assert_eq!(back, brief);
+        assert!(check_readiness(&brief).is_ready);
+        // Absent on the wire when unset; old briefs read without it.
+        let json = serde_json::to_value(full_brief()).unwrap();
+        assert!(json.get("revisit_when").is_none());
+        let old: PlanBrief = serde_json::from_value(json).unwrap();
+        assert_eq!(old.revisit_when, None);
     }
 
     #[test]
