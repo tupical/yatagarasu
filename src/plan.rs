@@ -140,6 +140,7 @@ mod tests {
                 decisions_made: vec!["Use OAuth".into()],
                 risks: vec!["Provider outage".into()],
                 constraints: vec!["No downtime".into()],
+                reversibility: None,
                 knowledge_base: vec!["Auth ADR".into()],
                 unverified_hypotheses: vec![],
                 rejected_alternatives: vec!["Session cookies".into()],

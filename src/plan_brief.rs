@@ -57,6 +57,12 @@ pub struct PlanBrief {
     /// layer's `constraint` directives when wiring the pipeline.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub constraints: Vec<String>,
+    /// Whether the decision behind the plan can be undone (ADR-0017). Like
+    /// `constraints`, not a §15 question: it rides from the Decisions layer to
+    /// Actions, where an irreversible packet needs a rollback gate. Absent =
+    /// not classified; never affects plan readiness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reversibility: Option<Reversibility>,
 
     // ── Optional ──────────────────────────────────────────────────────────────
     /// §15 Q4: What knowledge underpins the plan?
@@ -80,6 +86,16 @@ pub struct PlanBrief {
     /// §15 Q14: One project, many projects, or no new project?
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_structure: Option<String>,
+}
+
+/// Reversibility class of the decision a plan implements (ADR-0017). Wire
+/// form `"reversible" | "irreversible"`; the Decisions layer owns the
+/// criterion, Planning only carries it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reversibility {
+    Reversible,
+    Irreversible,
 }
 
 /// Result of [`check_readiness`].
@@ -296,5 +312,27 @@ mod tests {
         let json = serde_json::to_string(&brief).unwrap();
         let back: PlanBrief = serde_json::from_str(&json).unwrap();
         assert_eq!(brief, back);
+    }
+
+    #[test]
+    fn reversibility_rides_the_wire_without_touching_readiness() {
+        let legacy: PlanBrief = serde_json::from_value(serde_json::json!({
+            "goal": "g", "in_scope": ["a"], "completion_criteria": ["c"], "daruma_target": "t"
+        }))
+        .unwrap();
+        assert_eq!(legacy.reversibility, None);
+        assert!(serde_json::to_value(&legacy)
+            .unwrap()
+            .get("reversibility")
+            .is_none());
+
+        let brief = PlanBrief {
+            reversibility: Some(Reversibility::Irreversible),
+            ..full_brief()
+        };
+        let json = serde_json::to_value(&brief).unwrap();
+        assert_eq!(json["reversibility"], "irreversible");
+        assert_eq!(serde_json::from_value::<PlanBrief>(json).unwrap(), brief);
+        assert_eq!(check_readiness(&brief), check_readiness(&full_brief()));
     }
 }
