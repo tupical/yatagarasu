@@ -39,5 +39,5 @@ pub use time::Timestamp;
 // ── Operation re-exports ────────────────────────────────────────────────────────
 pub use decompose::{decompose_task, SplitDraft};
 pub use plan::{plan_ai, PlanError};
-pub use plan_brief::{check_readiness, PlanBrief, PlanReadinessReport};
+pub use plan_brief::{check_readiness, PlanBrief, PlanReadinessReport, Reversibility};
 pub use scope::{scope_task, ScopeDirection, UpdateDraft};
